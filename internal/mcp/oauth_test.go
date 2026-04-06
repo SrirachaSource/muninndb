@@ -80,9 +80,54 @@ func TestOAuthToken_ValidClientSecretPost(t *testing.T) {
 	if resp.ExpiresIn <= 0 {
 		t.Errorf("expected positive expires_in, got %d", resp.ExpiresIn)
 	}
+	if resp.RefreshToken != "mdb_mytoken" {
+		t.Errorf("expected refresh_token equal to access_token, got %q", resp.RefreshToken)
+	}
 	// Cache-Control must be no-store per RFC 6749.
 	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("expected Cache-Control 'no-store', got %q", cc)
+	}
+}
+
+func TestOAuthToken_RefreshGrant(t *testing.T) {
+	store := newFakeOAuthStore()
+	store.addClient("oc_test", "testsecret", "test", "mdb_mytoken")
+	srv := New(":0", &fakeEngine{}, "mdb_mytoken", nil, store, nil)
+
+	form := "grant_type=refresh_token&refresh_token=mdb_mytoken"
+	req := httptest.NewRequest("POST", "/mcp/oauth/token", strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.srv.Handler.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp oauthTokenResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.AccessToken != "mdb_mytoken" {
+		t.Errorf("expected re-issued access_token, got %q", resp.AccessToken)
+	}
+	if resp.RefreshToken != "mdb_mytoken" {
+		t.Errorf("expected refresh_token, got %q", resp.RefreshToken)
+	}
+}
+
+func TestOAuthToken_RefreshGrant_InvalidToken(t *testing.T) {
+	store := newFakeOAuthStore()
+	store.addClient("oc_test", "testsecret", "test", "mdb_mytoken")
+	srv := New(":0", &fakeEngine{}, "mdb_mytoken", nil, store, nil)
+
+	form := "grant_type=refresh_token&refresh_token=wrong_token"
+	req := httptest.NewRequest("POST", "/mcp/oauth/token", strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.srv.Handler.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Errorf("expected 401 for invalid refresh token, got %d", w.Code)
 	}
 }
 
@@ -242,7 +287,7 @@ func TestOAuthDiscovery_ReturnsMetadata(t *testing.T) {
 		t.Errorf("unexpected token_endpoint: %v", meta["token_endpoint"])
 	}
 	grants, ok := meta["grant_types_supported"].([]any)
-	if !ok || len(grants) != 2 {
+	if !ok || len(grants) != 3 {
 		t.Errorf("unexpected grant_types_supported: %v", meta["grant_types_supported"])
 	}
 	// Should include both authorization_code and client_credentials.
@@ -252,8 +297,8 @@ func TestOAuthDiscovery_ReturnsMetadata(t *testing.T) {
 			grantSet[s] = true
 		}
 	}
-	if !grantSet["authorization_code"] || !grantSet["client_credentials"] {
-		t.Errorf("expected authorization_code and client_credentials, got %v", meta["grant_types_supported"])
+	if !grantSet["authorization_code"] || !grantSet["client_credentials"] || !grantSet["refresh_token"] {
+		t.Errorf("expected authorization_code, client_credentials, and refresh_token, got %v", meta["grant_types_supported"])
 	}
 }
 

@@ -20,9 +20,10 @@ type oauthClientValidator interface {
 
 // oauthTokenResponse is the standard OAuth 2.0 token response (RFC 6749 Section 5.1).
 type oauthTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
 // oauthErrorResponse is the standard OAuth 2.0 error response (RFC 6749 Section 5.2).
@@ -33,9 +34,10 @@ type oauthErrorResponse struct {
 
 // oauthTokenExpiresIn is the advertised token lifetime. Since the underlying
 // MCP token is long-lived (no actual expiry), this is a hint to clients
-// telling them when to re-request. Claude.ai will call the token endpoint
-// again before this window expires.
-const oauthTokenExpiresIn = 3600 // 1 hour
+// telling them when to re-request. Set to 7 days because Claude.ai/mobile
+// treats expires_in as a hard deadline and won't auto-refresh reliably
+// with short windows (see GitHub issues on Claude OAuth token handling).
+const oauthTokenExpiresIn = 604800 // 7 days
 
 // rateLimitDelay is applied to failed OAuth token requests to slow brute-force
 // attempts. In production this could be replaced with a proper rate limiter.
@@ -83,9 +85,11 @@ func (s *MCPServer) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		s.handleTokenClientCredentials(w, r)
 	case "authorization_code":
 		s.handleTokenAuthorizationCode(w, r)
+	case "refresh_token":
+		s.handleTokenRefresh(w, r)
 	default:
 		sendOAuthError(w, http.StatusBadRequest, "unsupported_grant_type",
-			"supported grant types: client_credentials, authorization_code")
+			"supported grant types: client_credentials, authorization_code, refresh_token")
 	}
 }
 
@@ -138,15 +142,44 @@ func (s *MCPServer) handleTokenAuthorizationCode(w http.ResponseWriter, r *http.
 	sendTokenResponse(w, mcpToken)
 }
 
+// handleTokenRefresh handles the refresh_token grant type.
+// Since MCP tokens are long-lived, the refresh token IS the access token --
+// we just re-issue it. This lets Claude.ai/mobile silently refresh without
+// hitting an auth wall when expires_in elapses.
+func (s *MCPServer) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
+	refreshToken := r.FormValue("refresh_token")
+	if refreshToken == "" {
+		sendOAuthError(w, http.StatusBadRequest, "invalid_request",
+			"missing refresh_token parameter")
+		return
+	}
+
+	// Validate the refresh token by checking it against the MCP token.
+	// The refresh token is the MCP token itself, so if it's valid for
+	// bearer auth it's valid for refresh.
+	if s.token == "" || refreshToken != s.token {
+		time.Sleep(rateLimitDelay)
+		sendOAuthError(w, http.StatusUnauthorized, "invalid_grant",
+			"invalid refresh token")
+		return
+	}
+
+	slog.Info("mcp: OAuth token refreshed")
+	sendTokenResponse(w, refreshToken)
+}
+
 // sendTokenResponse writes a successful OAuth token response.
+// Includes a refresh_token so clients (Claude.ai/mobile) can silently
+// re-authenticate when the access token expires.
 func sendTokenResponse(w http.ResponseWriter, accessToken string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	json.NewEncoder(w).Encode(oauthTokenResponse{
-		AccessToken: accessToken,
-		TokenType:   "bearer",
-		ExpiresIn:   oauthTokenExpiresIn,
+		AccessToken:  accessToken,
+		TokenType:    "bearer",
+		ExpiresIn:    oauthTokenExpiresIn,
+		RefreshToken: accessToken, // MCP token is long-lived; refresh = re-issue
 	})
 }
 
@@ -173,7 +206,7 @@ func (s *MCPServer) handleOAuthDiscovery(w http.ResponseWriter, r *http.Request)
 		"authorization_endpoint": issuer + "/authorize",
 		"token_endpoint":         issuer + "/mcp/oauth/token",
 		"registration_endpoint":  issuer + "/oauth/register",
-		"grant_types_supported":  []string{"authorization_code", "client_credentials"},
+		"grant_types_supported":  []string{"authorization_code", "client_credentials", "refresh_token"},
 		"token_endpoint_auth_methods_supported": []string{
 			"client_secret_post",
 			"client_secret_basic",

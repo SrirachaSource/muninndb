@@ -41,14 +41,12 @@ const oauthTokenExpiresIn = 3600 // 1 hour
 // attempts. In production this could be replaced with a proper rate limiter.
 var rateLimitDelay = 100 * time.Millisecond
 
-// handleOAuthToken implements POST /mcp/oauth/token — the OAuth 2.0 Client
-// Credentials token endpoint (RFC 6749 Section 4.4).
+// handleOAuthToken implements POST /mcp/oauth/token — the OAuth 2.0 token
+// endpoint supporting both:
+//   - client_credentials grant (RFC 6749 Section 4.4) — machine-to-machine
+//   - authorization_code grant (RFC 6749 Section 4.1) — browser-based with PKCE
 //
-// Accepts client credentials via:
-//  1. Request body: client_id + client_secret (client_secret_post)
-//  2. HTTP Basic auth: Authorization: Basic base64(client_id:client_secret) (client_secret_basic)
-//
-// On success, returns the MCP bearer token that the client is mapped to.
+// On success, returns the MCP bearer token.
 func (s *MCPServer) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -65,8 +63,7 @@ func (s *MCPServer) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RFC 6749 Section 4.4.2: request body MUST be application/x-www-form-urlencoded.
-	// Reject other content types to prevent credentials leaking via query params.
+	// RFC 6749: request body MUST be application/x-www-form-urlencoded.
 	ct := r.Header.Get("Content-Type")
 	if !strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
 		sendOAuthError(w, http.StatusBadRequest, "invalid_request",
@@ -80,15 +77,20 @@ func (s *MCPServer) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate grant_type.
 	grantType := r.FormValue("grant_type")
-	if grantType != "client_credentials" {
+	switch grantType {
+	case "client_credentials":
+		s.handleTokenClientCredentials(w, r)
+	case "authorization_code":
+		s.handleTokenAuthorizationCode(w, r)
+	default:
 		sendOAuthError(w, http.StatusBadRequest, "unsupported_grant_type",
-			"only client_credentials grant is supported")
-		return
+			"supported grant types: client_credentials, authorization_code")
 	}
+}
 
-	// Extract client credentials — try Basic auth first, then form body.
+// handleTokenClientCredentials handles the client_credentials grant type.
+func (s *MCPServer) handleTokenClientCredentials(w http.ResponseWriter, r *http.Request) {
 	clientID, clientSecret, ok := extractClientCredentials(r)
 	if !ok {
 		w.Header().Set("WWW-Authenticate", `Basic realm="muninndb"`)
@@ -97,11 +99,8 @@ func (s *MCPServer) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate against the store.
 	client, err := s.oauthClients.ValidateOAuthClient(clientID, clientSecret)
 	if err != nil {
-		// Brute-force delay — slows down credential guessing.
-		// Do NOT log the client_secret or request body.
 		time.Sleep(rateLimitDelay)
 		slog.Warn("mcp: OAuth token request failed", "client_id", clientID)
 		w.Header().Set("WWW-Authenticate", `Basic realm="muninndb"`)
@@ -110,15 +109,42 @@ func (s *MCPServer) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("mcp: OAuth token issued", "client_id", clientID, "name", client.Name)
+	slog.Info("mcp: OAuth token issued (client_credentials)", "client_id", clientID, "name", client.Name)
+	sendTokenResponse(w, client.MCPToken)
+}
 
-	// Return the MCP token as the access token. The token is already valid
-	// for MCP auth — no separate token type needed.
+// handleTokenAuthorizationCode handles the authorization_code grant type with PKCE.
+func (s *MCPServer) handleTokenAuthorizationCode(w http.ResponseWriter, r *http.Request) {
+	code := r.FormValue("code")
+	clientID := r.FormValue("client_id")
+	redirectURI := r.FormValue("redirect_uri")
+	codeVerifier := r.FormValue("code_verifier")
+
+	if code == "" || clientID == "" || codeVerifier == "" {
+		sendOAuthError(w, http.StatusBadRequest, "invalid_request",
+			"missing required parameters: code, client_id, code_verifier")
+		return
+	}
+
+	mcpToken, err := s.authCodes.exchange(code, clientID, redirectURI, codeVerifier)
+	if err != nil {
+		time.Sleep(rateLimitDelay)
+		slog.Warn("mcp: auth code exchange failed", "client_id", clientID, "error", err.Error())
+		sendOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
+		return
+	}
+
+	slog.Info("mcp: OAuth token issued (authorization_code)", "client_id", clientID)
+	sendTokenResponse(w, mcpToken)
+}
+
+// sendTokenResponse writes a successful OAuth token response.
+func sendTokenResponse(w http.ResponseWriter, accessToken string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	json.NewEncoder(w).Encode(oauthTokenResponse{
-		AccessToken: client.MCPToken,
+		AccessToken: accessToken,
 		TokenType:   "bearer",
 		ExpiresIn:   oauthTokenExpiresIn,
 	})
@@ -144,13 +170,17 @@ func (s *MCPServer) handleOAuthDiscovery(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"issuer":                 issuer,
+		"authorization_endpoint": issuer + "/authorize",
 		"token_endpoint":         issuer + "/mcp/oauth/token",
-		"grant_types_supported":  []string{"client_credentials"},
+		"registration_endpoint":  issuer + "/oauth/register",
+		"grant_types_supported":  []string{"authorization_code", "client_credentials"},
 		"token_endpoint_auth_methods_supported": []string{
 			"client_secret_post",
 			"client_secret_basic",
+			"none",
 		},
-		"response_types_supported": []string{},
+		"response_types_supported":          []string{"code"},
+		"code_challenge_methods_supported":  []string{"S256"},
 	})
 }
 

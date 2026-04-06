@@ -153,7 +153,7 @@ func TestOAuthToken_WrongGrantType(t *testing.T) {
 	store := newFakeOAuthStore()
 	srv := New(":0", &fakeEngine{}, "mdb_tok", nil, store, nil)
 
-	body := "grant_type=authorization_code&client_id=oc_test&client_secret=sec"
+	body := "grant_type=implicit&client_id=oc_test&client_secret=sec"
 	req := httptest.NewRequest("POST", "/mcp/oauth/token", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -242,8 +242,18 @@ func TestOAuthDiscovery_ReturnsMetadata(t *testing.T) {
 		t.Errorf("unexpected token_endpoint: %v", meta["token_endpoint"])
 	}
 	grants, ok := meta["grant_types_supported"].([]any)
-	if !ok || len(grants) != 1 || grants[0] != "client_credentials" {
+	if !ok || len(grants) != 2 {
 		t.Errorf("unexpected grant_types_supported: %v", meta["grant_types_supported"])
+	}
+	// Should include both authorization_code and client_credentials.
+	grantSet := map[string]bool{}
+	for _, g := range grants {
+		if s, ok := g.(string); ok {
+			grantSet[s] = true
+		}
+	}
+	if !grantSet["authorization_code"] || !grantSet["client_credentials"] {
+		t.Errorf("expected authorization_code and client_credentials, got %v", meta["grant_types_supported"])
 	}
 }
 

@@ -24,6 +24,7 @@ type MCPServer struct {
 	token        string               // required Bearer token (mdb_ static token); empty = no auth
 	authKeys     apiKeyValidator      // optional: enables mk_ vault API key auth; nil = disabled
 	oauthClients oauthClientValidator // optional: enables OAuth client credentials; nil = disabled
+	authCodes    *authCodeStore       // in-memory authorization code store for PKCE flow
 	srv          *http.Server
 	tlsConfig    *tls.Config // nil = plain TCP
 
@@ -64,6 +65,7 @@ func New(addr string, eng EngineInterface, token string, keyAuth apiKeyValidator
 		token:        token,
 		authKeys:     keyAuth,
 		oauthClients: oauthAuth,
+		authCodes:    newAuthCodeStore(),
 		sseSessions:  make(map[string]*sseSession),
 		tlsConfig:    tlsConfig,
 	}
@@ -96,10 +98,14 @@ func New(addr string, eng EngineInterface, token string, keyAuth apiKeyValidator
 		}
 	})
 	mux.HandleFunc("/mcp/health", s.handleHealth)
-	// OAuth 2.0 Client Credentials endpoints — no Bearer auth required
-	// (the token endpoint IS the authentication mechanism).
+	// OAuth 2.0 endpoints — no Bearer auth required (these ARE the auth mechanism).
 	mux.HandleFunc("/mcp/oauth/token", s.handleOAuthToken)
+	mux.HandleFunc("/authorize", s.handleAuthorize)
+	mux.HandleFunc("/authorize/approve", s.handleAuthorizeApprove)
+	mux.HandleFunc("/oauth/register", s.handleOAuthClientRegistration)
+	// OAuth discovery (RFC 8414) and Protected Resource Metadata (RFC 9728).
 	mux.HandleFunc("/.well-known/oauth-authorization-server", s.handleOAuthDiscovery)
+	mux.HandleFunc("/.well-known/oauth-protected-resource", s.handleProtectedResourceMetadata)
 	s.srv = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	return s
 }

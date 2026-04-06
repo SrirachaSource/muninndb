@@ -350,7 +350,7 @@ func mkToolCallBody(toolName string, args map[string]any) []byte {
 // testServer wraps MCPServer with a mock engine and key store for integration tests.
 func newAuthTestServer(keyStore apiKeyValidator) *MCPServer {
 	eng := &fakeEngine{}
-	return New(":0", eng, "mdb_static", keyStore, nil)
+	return New(":0", eng, "mdb_static", keyStore, nil, nil)
 }
 
 func doAuthenticatedPost(srv *MCPServer, token string, body []byte) *httptest.ResponseRecorder {
@@ -564,7 +564,7 @@ func TestSSESession_StoresFullAuthContext(t *testing.T) {
 		Vault: "sse-vault",
 		Mode:  auth.ModeObserve,
 	})
-	srv := New(":0", &fakeEngine{}, "mdb_static", store, nil)
+	srv := New(":0", &fakeEngine{}, "mdb_static", store, nil, nil)
 
 	// Manually insert a session as handleSSE would after auth
 	a := authFromRequest(func() *http.Request {
@@ -849,7 +849,7 @@ func TestDispatch_UnknownMode_Rejected(t *testing.T) {
 // --- SSE message auth re-validation ---
 
 func TestSSEMessage_RequiresAuth_WhenServerHasToken(t *testing.T) {
-	srv := New(":0", &fakeEngine{}, "mdb_secret", nil, nil)
+	srv := New(":0", &fakeEngine{}, "mdb_secret", nil, nil, nil)
 
 	// Insert a fake SSE session
 	srv.sseSessionsMu.Lock()
@@ -874,7 +874,7 @@ func TestSSEMessage_RequiresAuth_WhenServerHasToken(t *testing.T) {
 // --- findSSEChannelsByToken with empty token ---
 
 func TestFindSSEChannelsByToken_EmptyToken_ReturnsNil(t *testing.T) {
-	srv := New(":0", &fakeEngine{}, "", nil, nil)
+	srv := New(":0", &fakeEngine{}, "", nil, nil, nil)
 
 	srv.sseSessionsMu.Lock()
 	srv.sseSessions["s1"] = &sseSession{ch: make(chan []byte, 4), auth: AuthContext{Token: ""}}

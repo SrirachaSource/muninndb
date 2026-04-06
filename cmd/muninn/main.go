@@ -112,6 +112,10 @@ func main() {
 			runAudit(rest)
 			return
 		}
+		if sub == "oauth" || strings.HasPrefix(sub, "oauth:") {
+			runOAuth(rest)
+			return
+		}
 		if strings.HasPrefix(sub, "cluster:") {
 			runCluster(rest)
 			return

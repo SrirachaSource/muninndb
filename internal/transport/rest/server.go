@@ -92,6 +92,7 @@ type Server struct {
 	// MCP info — set at construction time for the /api/admin/mcp-info endpoint.
 	mcpAddr     string // MCP listen address, e.g. ":8750"
 	mcpHasToken bool   // whether a bearer token is configured
+	mcpToken    string // MCP bearer token value (for OAuth client creation)
 
 	pluginRegistry *plugin.Registry
 
@@ -137,6 +138,7 @@ type EnrichInfo struct {
 type MCPInfo struct {
 	Addr     string // MCP listen address, e.g. ":8750"
 	HasToken bool   // whether a bearer token is configured
+	Token    string // the MCP bearer token value (needed for OAuth client creation)
 }
 
 // NewServer creates a new REST server.
@@ -169,6 +171,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	if len(mcpInfo) > 0 {
 		s.mcpAddr = mcpInfo[0].Addr
 		s.mcpHasToken = mcpInfo[0].HasToken
+		s.mcpToken = mcpInfo[0].Token
 	}
 	// Start background DB writability probe (non-blocking, avoids probing on every request).
 	go s.probeDBWritability()
@@ -230,6 +233,10 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("POST /api/admin/keys", s.withAdminMiddleware(s.handleCreateAPIKey(authStore)))
 	mux.HandleFunc("GET /api/admin/keys", s.withAdminMiddleware(s.handleListAPIKeys(authStore)))
 	mux.HandleFunc("DELETE /api/admin/keys/{id}", s.withAdminMiddleware(s.handleRevokeAPIKey(authStore)))
+	// OAuth client management — admin session required.
+	mux.HandleFunc("POST /api/admin/oauth/clients", s.withAdminMiddleware(s.handleCreateOAuthClient(authStore, s.mcpToken)))
+	mux.HandleFunc("GET /api/admin/oauth/clients", s.withAdminMiddleware(s.handleListOAuthClients(authStore)))
+	mux.HandleFunc("DELETE /api/admin/oauth/clients/{id}", s.withAdminMiddleware(s.handleRevokeOAuthClient(authStore)))
 	mux.HandleFunc("PUT /api/admin/vaults/config", s.withAdminMiddleware(s.handleSetVaultConfig(authStore)))
 	mux.HandleFunc("PUT /api/admin/password", s.withAdminMiddleware(s.handleChangeAdminPassword(authStore)))
 	mux.HandleFunc("GET /api/admin/embed/status", s.withAdminMiddleware(s.handleEmbedStatus))

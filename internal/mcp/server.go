@@ -20,11 +20,12 @@ import (
 
 // MCPServer serves the MCP JSON-RPC 2.0 protocol on a single HTTP mux.
 type MCPServer struct {
-	engine   EngineInterface
-	token    string         // required Bearer token (mdb_ static token); empty = no auth
-	authKeys apiKeyValidator // optional: enables mk_ vault API key auth; nil = disabled
-	srv      *http.Server
-	tlsConfig *tls.Config // nil = plain TCP
+	engine       EngineInterface
+	token        string               // required Bearer token (mdb_ static token); empty = no auth
+	authKeys     apiKeyValidator      // optional: enables mk_ vault API key auth; nil = disabled
+	oauthClients oauthClientValidator // optional: enables OAuth client credentials; nil = disabled
+	srv          *http.Server
+	tlsConfig    *tls.Config // nil = plain TCP
 
 	sseSessionsMu sync.RWMutex
 	sseSessions   map[string]*sseSession // sessionID → session
@@ -55,14 +56,16 @@ type sseSession struct {
 // New creates an MCPServer. addr is the listen address (e.g., ":8750").
 // token is the required static Bearer token (mdb_ style); pass "" to disable auth.
 // keyAuth, if non-nil, enables mk_ vault API key authentication with automatic vault pinning.
+// oauthAuth, if non-nil, enables OAuth 2.0 Client Credentials grant on /mcp/oauth/token.
 // tlsConfig, if non-nil, enables TLS on the listener.
-func New(addr string, eng EngineInterface, token string, keyAuth apiKeyValidator, tlsConfig *tls.Config) *MCPServer {
+func New(addr string, eng EngineInterface, token string, keyAuth apiKeyValidator, oauthAuth oauthClientValidator, tlsConfig *tls.Config) *MCPServer {
 	s := &MCPServer{
-		engine:      eng,
-		token:       token,
-		authKeys:    keyAuth,
-		sseSessions: make(map[string]*sseSession),
-		tlsConfig:   tlsConfig,
+		engine:       eng,
+		token:        token,
+		authKeys:     keyAuth,
+		oauthClients: oauthAuth,
+		sseSessions:  make(map[string]*sseSession),
+		tlsConfig:    tlsConfig,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
@@ -93,6 +96,10 @@ func New(addr string, eng EngineInterface, token string, keyAuth apiKeyValidator
 		}
 	})
 	mux.HandleFunc("/mcp/health", s.handleHealth)
+	// OAuth 2.0 Client Credentials endpoints — no Bearer auth required
+	// (the token endpoint IS the authentication mechanism).
+	mux.HandleFunc("/mcp/oauth/token", s.handleOAuthToken)
+	mux.HandleFunc("/.well-known/oauth-authorization-server", s.handleOAuthDiscovery)
 	s.srv = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	return s
 }

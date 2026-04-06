@@ -226,6 +226,24 @@ var subcommandHelp = map[string]func(){
 				"muninn api-key revoke A1B2C3D4",
 			})
 	},
+	"oauth": func() {
+		printSubcommandUsage("oauth", "OAuth client management", "muninn oauth <command> [flags]",
+			[][2]string{
+				{"create-client --name <name>", "Create an OAuth client (credentials shown once)"},
+				{"list", "List OAuth clients"},
+				{"revoke <client-id>", "Revoke an OAuth client"},
+				{"", ""},
+				{"-u <user>", "Admin username (default: root)"},
+				{"-p", "Prompt for password"},
+				{"-p<password>", "Inline password (no space)"},
+				{"-h <host:port>", "Server host:port (default: 127.0.0.1:8475)"},
+			},
+			[]string{
+				"muninn oauth create-client --name claude-ai",
+				"muninn oauth list",
+				"muninn oauth revoke oc_abc123",
+			})
+	},
 	"admin": func() {
 		printSubcommandUsage("admin", "admin user management", "muninn admin <command> [flags]",
 			[][2]string{
@@ -317,6 +335,7 @@ func printHelp() {
 	fmt.Printf("  %-32s %s\n", cyan("muninn show vaults"), "List all vaults (requires server running)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn vault <command>"), "Vault management (create, list, delete, clear, clone, merge, export, import)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn api-key <command>"), "API key management (create, list, revoke)")
+	fmt.Printf("  %-32s %s\n", cyan("muninn oauth <command>"), "OAuth client management (create-client, list, revoke)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn admin change-password"), "Change the admin password")
 	fmt.Printf("  %-32s %s\n", cyan("muninn exec <op> [flags]"), "One-shot remember/recall/read/forget (no daemon needed)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn dream [--dry-run]"), "LLM-driven memory consolidation (server must be stopped)")

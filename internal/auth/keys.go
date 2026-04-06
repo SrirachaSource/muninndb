@@ -1,10 +1,11 @@
 package auth
 
 const (
-	prefixAdminUser  byte = 0x11
-	prefixAPIKey     byte = 0x12
-	prefixAPIKeyVIdx byte = 0x13
-	prefixVaultCfg   byte = 0x14
+	prefixAdminUser   byte = 0x11
+	prefixAPIKey      byte = 0x12
+	prefixAPIKeyVIdx  byte = 0x13
+	prefixVaultCfg    byte = 0x14
+	prefixOAuthClient byte = 0x15
 )
 
 func adminUserKey(username string) []byte {
@@ -49,4 +50,15 @@ func vaultConfigKey(vault string) []byte {
 
 func vaultConfigUpperBound() []byte {
 	return []byte{prefixVaultCfg + 1}
+}
+
+func oauthClientKey(clientID string) []byte {
+	key := make([]byte, 1+len(clientID))
+	key[0] = prefixOAuthClient
+	copy(key[1:], clientID)
+	return key
+}
+
+func oauthClientUpperBound() []byte {
+	return []byte{prefixOAuthClient + 1}
 }

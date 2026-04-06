@@ -1223,6 +1223,7 @@ func runServer() {
 	restServer := rest.NewServer(*restAddr, restWrapper, authStore, sessionSecret, corsOrigins, embedInfo, enrichInfo, pluginRegistry, *dataDir, clientTLS, rest.MCPInfo{
 		Addr:     *mcpAddr,
 		HasToken: *mcpToken != "",
+		Token:    *mcpToken,
 	})
 	restServer.SetVersion(muninnVersion())
 
@@ -1238,7 +1239,7 @@ func runServer() {
 
 	// Build MCP server
 	mcpAdapter := mcp.NewEngineAdapter(eng, enrichPlugin, pStore)
-	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, authStore, clientTLS)
+	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, authStore, authStore, clientTLS)
 
 	// Build gRPC server
 	grpcAdapter := grpcpkg.NewEngineAdapter(eng)

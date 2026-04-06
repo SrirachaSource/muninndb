@@ -31,6 +31,17 @@ const (
 	ModeWrite   = "write"   // ingest-only; read endpoints blocked at middleware layer
 )
 
+// OAuthClient represents an OAuth 2.0 Client Credentials grant client.
+// Each client maps to an MCP token — when a valid client authenticates via
+// the token endpoint, the returned access token is the existing MCP token.
+type OAuthClient struct {
+	ID           string    `json:"id"`            // client_id (public identifier)
+	Name         string    `json:"name"`           // human-readable label
+	SecretHash   []byte    `json:"secret_hash"`    // bcrypt hash of client_secret
+	MCPToken     string    `json:"mcp_token"`      // the MCP bearer token this client maps to
+	CreatedAt    time.Time `json:"created_at"`
+}
+
 type contextKey string
 
 const (

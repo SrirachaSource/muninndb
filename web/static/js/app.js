@@ -174,7 +174,7 @@ document.addEventListener('alpine:init', () => {
     showShortcutsHelp: false,
 
     // Settings
-    settingsTab: 'connect', // 'connect' | 'vault' | 'plugins' | 'keys' | 'admin'
+    settingsTab: 'connect', // 'connect' | 'vault' | 'plugins' | 'keys' | 'oauth' | 'admin'
     embedStatus: null,       // loaded from GET /api/admin/embed/status
     mcpInfo: null,           // loaded from GET /api/admin/mcp-info
     connectCopied: false,    // feedback for copy button
@@ -189,6 +189,12 @@ document.addEventListener('alpine:init', () => {
     apiKeyToken: null,
     apiKeyError: '',
     apiKeyLoading: false,
+    // OAuth client management
+    oauthClients: [],
+    oauthForm: { name: '' },
+    oauthCreatedCreds: null,
+    oauthError: '',
+    oauthLoading: false,
     plugins: [],
     cogWorkerStats: null,
 
@@ -269,7 +275,7 @@ document.addEventListener('alpine:init', () => {
 
         // Parse settings sub-tab if entering settings view
         if (raw === 'settings' && parts[1]) {
-          const validTabs = ['connect', 'vault', 'plugins', 'keys', 'admin'];
+          const validTabs = ['connect', 'vault', 'plugins', 'keys', 'oauth', 'admin'];
           if (validTabs.includes(parts[1])) {
             this.settingsTab = parts[1];
           }
@@ -439,7 +445,7 @@ document.addEventListener('alpine:init', () => {
         const hash = location.hash.replace(/^#\/?/, '');
         const parts = hash.split('/');
         if (parts[0] === 'settings' && parts[1]) {
-          const validTabs = ['connect', 'vault', 'plugins', 'keys', 'admin'];
+          const validTabs = ['connect', 'vault', 'plugins', 'keys', 'oauth', 'admin'];
           if (validTabs.includes(parts[1])) {
             this.settingsTab = parts[1];
           }
@@ -460,6 +466,8 @@ document.addEventListener('alpine:init', () => {
         } else if (this.settingsTab === 'keys') {
           this.loadApiKeys();
           this.loadVaults();
+        } else if (this.settingsTab === 'oauth') {
+          this.loadOAuthClients();
         }
         // Admin tab doesn't need special loading
 
@@ -1878,6 +1886,48 @@ document.addEventListener('alpine:init', () => {
             await this.loadApiKeys();
         } catch (e) {
             this.addNotification('error', 'Failed to revoke key: ' + (e.message || 'unknown error'));
+        }
+    },
+    // ── OAuth client management ───────────────────────────────────
+    async loadOAuthClients() {
+        try {
+            const data = await this.apiCall('/api/admin/oauth/clients');
+            this.oauthClients = Array.isArray(data?.clients) ? data.clients : [];
+        } catch (e) {
+            this.oauthClients = [];
+        }
+    },
+    async createOAuthClient() {
+        this.oauthError = '';
+        if (!this.oauthForm.name) {
+            this.oauthError = 'Client name is required.';
+            return;
+        }
+        this.oauthLoading = true;
+        try {
+            const data = await this.apiCall('/api/admin/oauth/clients', {
+                method: 'POST',
+                body: JSON.stringify(this.oauthForm),
+            });
+            this.oauthCreatedCreds = {
+                client_id: data?.client_id || '',
+                client_secret: data?.client_secret || '',
+            };
+            this.oauthForm = { name: '' };
+            await this.loadOAuthClients();
+        } catch (e) {
+            this.oauthError = e.message || 'Failed to create OAuth client.';
+        } finally {
+            this.oauthLoading = false;
+        }
+    },
+    async revokeOAuthClient(clientId) {
+        if (!confirm('Revoke this OAuth client? This cannot be undone.')) return;
+        try {
+            await this.apiCall('/api/admin/oauth/clients/' + encodeURIComponent(clientId), { method: 'DELETE' });
+            await this.loadOAuthClients();
+        } catch (e) {
+            this.addNotification('error', 'Failed to revoke client: ' + (e.message || 'unknown error'));
         }
     },
     async loadPlugins() {

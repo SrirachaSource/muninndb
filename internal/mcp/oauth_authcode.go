@@ -31,19 +31,43 @@ type authCodeEntry struct {
 const authCodeTTL = 5 * time.Minute
 const authCodeLen = 32 // 32 bytes = 43 chars base64url
 
-// authCodeStore is a simple in-memory store for pending authorization codes.
-// Codes are single-use (deleted on exchange) and expire after authCodeTTL.
-// This is adequate for a single-instance server; clustered deployments would
-// need a shared store (Pebble or Redis).
+// approvedClientTTL is how long a client_id stays auto-approved after the
+// user clicks Authorize. Prevents the double-consent-page issue where
+// Claude.ai re-initiates the OAuth flow after the first redirect.
+const approvedClientTTL = 10 * time.Minute
+
+// authCodeStore is a simple in-memory store for pending authorization codes
+// and recently-approved client_ids. Codes are single-use (deleted on exchange)
+// and expire after authCodeTTL. This is adequate for a single-instance server;
+// clustered deployments would need a shared store (Pebble or Redis).
 type authCodeStore struct {
-	mu    sync.Mutex
-	codes map[string]*authCodeEntry
+	mu              sync.Mutex
+	codes           map[string]*authCodeEntry
+	approvedClients map[string]time.Time // client_id → approval time
 }
 
 func newAuthCodeStore() *authCodeStore {
-	s := &authCodeStore{codes: make(map[string]*authCodeEntry)}
+	s := &authCodeStore{
+		codes:           make(map[string]*authCodeEntry),
+		approvedClients: make(map[string]time.Time),
+	}
 	go s.sweepLoop()
 	return s
+}
+
+// markApproved records that a client_id was approved by the user.
+func (s *authCodeStore) markApproved(clientID string) {
+	s.mu.Lock()
+	s.approvedClients[clientID] = time.Now()
+	s.mu.Unlock()
+}
+
+// isApproved returns true if the client was recently approved.
+func (s *authCodeStore) isApproved(clientID string) bool {
+	s.mu.Lock()
+	t, ok := s.approvedClients[clientID]
+	s.mu.Unlock()
+	return ok && time.Since(t) < approvedClientTTL
 }
 
 // issue creates a new authorization code and stores it.
@@ -99,7 +123,7 @@ func (s *authCodeStore) exchange(code, clientID, redirectURI, codeVerifier strin
 	return entry.MCPToken, nil
 }
 
-// sweepLoop removes expired codes every 60 seconds.
+// sweepLoop removes expired codes and approvals every 60 seconds.
 func (s *authCodeStore) sweepLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
@@ -109,6 +133,11 @@ func (s *authCodeStore) sweepLoop() {
 		for code, entry := range s.codes {
 			if now.Sub(entry.CreatedAt) > authCodeTTL {
 				delete(s.codes, code)
+			}
+		}
+		for clientID, t := range s.approvedClients {
+			if now.Sub(t) > approvedClientTTL {
+				delete(s.approvedClients, clientID)
 			}
 		}
 		s.mu.Unlock()
@@ -238,17 +267,27 @@ func (s *MCPServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up client name for the consent page. If the client doesn't exist
-	// in our OAuth store, we still show the consent page with just the ID —
-	// Claude.ai uses dynamic client registration patterns where the client_id
-	// may not be pre-registered.
-	clientName := clientID
-	if s.oauthClients != nil {
-		// Try to look up a friendly name. ValidateOAuthClient needs a secret
-		// which we don't have here, so we use a separate lookup if available.
-		// For now, just show the client_id.
-		clientName = clientID
+	// Auto-approve if the user already approved this client recently.
+	// This prevents the double-consent-page issue where Claude.ai re-initiates
+	// the OAuth flow after the first redirect back.
+	if s.authCodes.isApproved(clientID) {
+		code, err := s.authCodes.issue(clientID, redirectURI, codeChallenge, codeChallengeMethod, s.token)
+		if err != nil {
+			slog.Error("mcp: failed to issue auth code (auto-approve)", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		slog.Info("mcp: auto-approved authorization", "client_id", clientID)
+		params := url.Values{"code": {code}}
+		if state != "" {
+			params.Set("state", state)
+		}
+		http.Redirect(w, r, redirectURI+"?"+params.Encode(), http.StatusFound)
+		return
 	}
+
+	// First time — show consent page.
+	clientName := clientID
 
 	// Build deny URL — redirect back with error=access_denied.
 	denyParams := url.Values{
@@ -307,6 +346,10 @@ func (s *MCPServer) handleAuthorizeApprove(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	// Remember this client as approved so subsequent /authorize requests
+	// skip the consent page (prevents double-consent on Claude.ai re-auth).
+	s.authCodes.markApproved(clientID)
 
 	slog.Info("mcp: authorization code issued", "client_id", clientID)
 

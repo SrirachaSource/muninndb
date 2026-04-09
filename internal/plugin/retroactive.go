@@ -547,6 +547,26 @@ func (rp *RetroactiveProcessor) processEnrichEngram(ctx context.Context, eng *En
 		hasRelationships := flags&DigestRelationships != 0
 		hasClassification := flags&DigestClassified != 0
 
+		// Reconcile inline data with missing flags: if the engram already has
+		// data for a stage (set by the caller at write time) but the digest
+		// flag was never set, set it now. Without this, the pipeline skips the
+		// stage (data already present) but the retroactive processor keeps
+		// retrying the engram (flag missing) — an infinite retry loop.
+		if !hasClassification && (eng.MemoryType != 0 || eng.TypeLabel != "") {
+			if err := rp.store.SetDigestFlag(ctx, eng.ID, DigestClassified); err != nil {
+				slog.Warn("enrich: failed to reconcile DigestClassified flag",
+					"id", eng.ID.String(), "err", err)
+			}
+			hasClassification = true
+		}
+		if !hasSummary && eng.Summary != "" {
+			if err := rp.store.SetDigestFlag(ctx, eng.ID, DigestSummarized); err != nil {
+				slog.Warn("enrich: failed to reconcile DigestSummarized flag",
+					"id", eng.ID.String(), "err", err)
+			}
+			hasSummary = true
+		}
+
 		// All pipeline stages are already done for this engram — skip it entirely.
 		if hasSummary && hasEntities && hasRelationships && hasClassification {
 			return nil

@@ -2,7 +2,6 @@ package enrich
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -624,10 +623,11 @@ func TestFullModeBackwardCompat(t *testing.T) {
 	}
 }
 
-// TestPipelineRun_AllStagesSkipped_ReturnsNothingToEnrich verifies that when all
+// TestPipelineRun_AllStagesSkipped_CarriesInlineData verifies that when all
 // pipeline stages are skipped because the engram already has inline data, the
-// pipeline returns ErrNothingToEnrich (not a generic error).
-func TestPipelineRun_AllStagesSkipped_ReturnsNothingToEnrich(t *testing.T) {
+// result carries forward that inline data so PersistEnrichmentResult/UpdateDigest
+// can set the corresponding digest flags (DigestClassified, DigestSummarized).
+func TestPipelineRun_AllStagesSkipped_CarriesInlineData(t *testing.T) {
 	mock := NewMockLLMProvider()
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
 	pipeline := NewPipeline(mock, limiter)
@@ -643,14 +643,130 @@ func TestPipelineRun_AllStagesSkipped_ReturnsNothingToEnrich(t *testing.T) {
 	}
 
 	result, err := pipeline.Run(context.Background(), eng)
-	if !errors.Is(err, ErrNothingToEnrich) {
-		t.Fatalf("expected ErrNothingToEnrich, got: %v", err)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result != nil {
-		t.Fatalf("expected nil result, got: %+v", result)
+	if result == nil {
+		t.Fatal("expected non-nil result carrying inline data")
 	}
 	if mock.callCount != 0 {
 		t.Fatalf("expected 0 LLM calls, got %d", mock.callCount)
+	}
+	// Inline data should be carried forward into the result.
+	if result.Summary != "existing summary" {
+		t.Fatalf("expected carried-forward summary, got %q", result.Summary)
+	}
+	if len(result.KeyPoints) != 1 || result.KeyPoints[0] != "kp1" {
+		t.Fatalf("expected carried-forward key points, got %v", result.KeyPoints)
+	}
+	if result.MemoryType != "decision" {
+		t.Fatalf("expected carried-forward memory type 'decision', got %q", result.MemoryType)
+	}
+}
+
+// TestSkipClassification_CarriesInlineDataForDigestFlag verifies that when an
+// engram is written with MemoryType=observation and TypeLabel="observation",
+// the pipeline skips the classification LLM call but carries the inline data
+// into the result so that PersistEnrichmentResult -> UpdateDigest sets
+// DigestClassified. This is the root cause of the digest flag bug.
+func TestSkipClassification_CarriesInlineDataForDigestFlag(t *testing.T) {
+	var calledClassify bool
+	mock := NewMockLLMProvider()
+	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
+		if strings.Contains(system, "memory classification") {
+			calledClassify = true
+			return `{"memory_type": "task"}`, nil
+		}
+		if strings.Contains(system, "entity extraction") {
+			return `{"entities": [{"name": "X", "type": "tool", "confidence": 0.9}]}`, nil
+		}
+		if strings.Contains(system, "relationship") {
+			return `{"relationships": []}`, nil
+		}
+		if strings.Contains(system, "summarization") {
+			return `{"summary": "s", "key_points": ["k"]}`, nil
+		}
+		return `{}`, nil
+	}
+
+	limiter := NewTokenBucketLimiter(100.0, 100.0)
+	pipeline := NewPipeline(mock, limiter)
+
+	eng := &storage.Engram{
+		ID:         storage.NewULID(),
+		Concept:    "inline-classified",
+		Content:    "content with inline classification",
+		MemoryType: storage.TypeObservation,
+		TypeLabel:  "observation",
+	}
+
+	result, err := pipeline.Run(context.Background(), eng)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if calledClassify {
+		t.Fatal("classification LLM call should have been skipped (engram already classified)")
+	}
+
+	// The result must carry forward the inline classification so that
+	// UpdateDigest sees non-empty MemoryType/TypeLabel and sets DigestClassified.
+	if result.MemoryType != "observation" {
+		t.Fatalf("expected carried-forward MemoryType 'observation', got %q", result.MemoryType)
+	}
+	if result.TypeLabel != "observation" {
+		t.Fatalf("expected carried-forward TypeLabel 'observation', got %q", result.TypeLabel)
+	}
+}
+
+// TestSkipSummary_CarriesInlineDataForDigestFlag verifies that when an engram
+// is written with a pre-set Summary, the pipeline skips the summarization LLM
+// call but carries the inline data into the result for DigestSummarized.
+func TestSkipSummary_CarriesInlineDataForDigestFlag(t *testing.T) {
+	var calledSummary bool
+	mock := NewMockLLMProvider()
+	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
+		if strings.Contains(system, "summarization") {
+			calledSummary = true
+			return `{"summary": "new", "key_points": ["new"]}`, nil
+		}
+		if strings.Contains(system, "entity extraction") {
+			return `{"entities": [{"name": "X", "type": "tool", "confidence": 0.9}]}`, nil
+		}
+		if strings.Contains(system, "relationship") {
+			return `{"relationships": []}`, nil
+		}
+		if strings.Contains(system, "memory classification") {
+			return `{"memory_type": "fact", "category": "c", "subcategory": "s", "tags": []}`, nil
+		}
+		return `{}`, nil
+	}
+
+	limiter := NewTokenBucketLimiter(100.0, 100.0)
+	pipeline := NewPipeline(mock, limiter)
+
+	eng := &storage.Engram{
+		ID:        storage.NewULID(),
+		Concept:   "inline-summarized",
+		Content:   "content with inline summary",
+		Summary:   "pre-set summary",
+		KeyPoints: []string{"pre-set kp"},
+	}
+
+	result, err := pipeline.Run(context.Background(), eng)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if calledSummary {
+		t.Fatal("summarization LLM call should have been skipped (engram already has summary)")
+	}
+
+	// The result must carry forward the inline summary so that
+	// UpdateDigest sees non-empty Summary and sets DigestSummarized.
+	if result.Summary != "pre-set summary" {
+		t.Fatalf("expected carried-forward Summary 'pre-set summary', got %q", result.Summary)
+	}
+	if len(result.KeyPoints) != 1 || result.KeyPoints[0] != "pre-set kp" {
+		t.Fatalf("expected carried-forward KeyPoints, got %v", result.KeyPoints)
 	}
 }
 

@@ -148,6 +148,12 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 			}
 			_ = tags
 		}
+	} else if engramHasClassification(eng) {
+		// Stage skipped because inline data exists. Carry the engram's existing
+		// classification into the result so PersistEnrichmentResult -> UpdateDigest
+		// sees non-empty values and sets DigestClassified.
+		result.MemoryType = eng.MemoryType.String()
+		result.TypeLabel = eng.TypeLabel
 	}
 
 	// Call 4: Summarization
@@ -160,6 +166,12 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 			result.Summary = summary
 			result.KeyPoints = keyPoints
 		}
+	} else if engramHasSummary(eng) {
+		// Stage skipped because inline data exists. Carry the engram's existing
+		// summary into the result so PersistEnrichmentResult -> UpdateDigest
+		// sees non-empty values and sets DigestSummarized.
+		result.Summary = eng.Summary
+		result.KeyPoints = eng.KeyPoints
 	}
 
 	// If ALL stages produced nothing, return error so retry can be attempted

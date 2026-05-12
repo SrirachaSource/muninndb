@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -12,7 +13,11 @@ import (
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
-// MockLLMProvider is a mock LLM provider for testing.
+// MockLLMProvider is a mock LLM provider for testing. The default Complete
+// recognises the unified enrichment prompt (the only system prompt the
+// pipeline now emits) and returns a complete JSON response containing all
+// stage fields; ParseUnifiedResponse drops the fields for stages that aren't
+// in the pipeline's enabled set.
 type MockLLMProvider struct {
 	responses      map[string]string
 	callCount      int
@@ -27,9 +32,7 @@ func NewMockLLMProvider() *MockLLMProvider {
 	}
 }
 
-func (m *MockLLMProvider) Name() string {
-	return "mock"
-}
+func (m *MockLLMProvider) Name() string { return "mock" }
 
 func (m *MockLLMProvider) Init(ctx context.Context, cfg LLMProviderConfig) error {
 	return nil
@@ -47,33 +50,51 @@ func (m *MockLLMProvider) Complete(ctx context.Context, system, user string) (st
 		return "", fmt.Errorf("mock provider error")
 	}
 
-	// Return default responses based on system prompt keywords.
-	// Order matters: check "summarization" before "memory classification"
-	// because the summarize prompt contains the word "memory" in its rules.
-	if contains(system, "entity extraction") {
+	if contains(system, "memory enrichment system") {
+		entities := `[{"name": "PostgreSQL", "type": "database", "confidence": 0.95}]`
 		if m.entityResponse != "" {
-			return m.entityResponse, nil
+			if extracted := extractEntitiesArrayJSON(m.entityResponse); extracted != "" {
+				entities = extracted
+			}
 		}
-		return `{"entities": [{"name": "PostgreSQL", "type": "database", "confidence": 0.95}]}`, nil
-	}
-	if contains(system, "relationship") {
-		return `{"relationships": [{"from": "app", "to": "PostgreSQL", "type": "uses", "weight": 0.9}]}`, nil
-	}
-	if contains(system, "summarization") {
-		return `{"summary": "This is a test summary.", "key_points": ["point 1", "point 2"]}`, nil
-	}
-	if contains(system, "memory classification") {
-		return `{"memory_type": "decision", "category": "infrastructure", "subcategory": "databases", "tags": ["db"]}`, nil
+		return `{
+			"entities": ` + entities + `,
+			"relationships": [{"from": "PostgreSQL", "to": "PostgreSQL", "type": "alternative_to", "weight": 0.5}],
+			"memory_type": "decision",
+			"type_label": "",
+			"category": "infrastructure",
+			"subcategory": "databases",
+			"tags": ["db"],
+			"summary": "This is a test summary.",
+			"key_points": ["point 1", "point 2"]
+		}`, nil
 	}
 
 	return "{}", nil
 }
 
-func (m *MockLLMProvider) Close() error {
-	return nil
+func (m *MockLLMProvider) Close() error { return nil }
+
+// extractEntitiesArrayJSON pulls the value of a top-level "entities" field
+// from a JSON string, returning just the array JSON. Returns "" if the field
+// is absent or the input is invalid.
+func extractEntitiesArrayJSON(jsonStr string) string {
+	var wrapper struct {
+		Entities json.RawMessage `json:"entities"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
+		return ""
+	}
+	if len(wrapper.Entities) == 0 {
+		return ""
+	}
+	return string(wrapper.Entities)
 }
 
-// TestPipelineRun_Success tests successful pipeline execution.
+func boolPtr(b bool) *bool { return &b }
+
+// TestPipelineRun_Success verifies the happy path: one unified call yields all
+// four stage outputs in a single response.
 func TestPipelineRun_Success(t *testing.T) {
 	mock := NewMockLLMProvider()
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
@@ -85,39 +106,32 @@ func TestPipelineRun_Success(t *testing.T) {
 		Content: "test content here",
 	}
 
-	ctx := context.Background()
-	result, err := pipeline.Run(ctx, eng)
-
+	result, err := pipeline.Run(context.Background(), eng)
 	if err != nil {
 		t.Fatalf("pipeline.Run failed: %v", err)
 	}
-
 	if result == nil {
-		t.Fatalf("expected non-nil result")
+		t.Fatal("expected non-nil result")
 	}
-
+	if mock.callCount != 1 {
+		t.Fatalf("expected exactly 1 LLM call (unified), got %d", mock.callCount)
+	}
 	if len(result.Entities) == 0 {
-		t.Fatalf("expected at least one entity, got: %d", len(result.Entities))
+		t.Fatal("expected at least one entity")
 	}
-
-	// Summary may be empty due to parsing, but we should have some result
-	// Just check that we got a result (not checking summary specifically)
-	if result.MemoryType == "" && result.Summary == "" && len(result.Entities) == 0 {
-		t.Fatalf("expected at least one field to be populated")
+	if result.Summary == "" {
+		t.Fatal("expected summary")
 	}
-
-	if mock.callCount > 0 && mock.callCount < 4 {
-		// If we have entities, we should make all 4 calls
-		// but if parsing fails, callCount might be 0
-		// Just verify we made a reasonable number of calls
-		t.Logf("callCount: %d", mock.callCount)
+	if result.MemoryType == "" {
+		t.Fatal("expected memory type")
 	}
 }
 
-// TestPipelineRun_ProviderError tests graceful degradation when provider fails.
+// TestPipelineRun_ProviderError covers the case where the unified LLM call
+// fails. With nothing carried forward from the engram, the pipeline must
+// surface the error.
 func TestPipelineRun_ProviderError(t *testing.T) {
 	mock := NewMockLLMProvider()
-	// Simulate first call failing
 	mock.failCount = 1
 
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
@@ -125,63 +139,44 @@ func TestPipelineRun_ProviderError(t *testing.T) {
 
 	eng := &storage.Engram{
 		ID:      storage.NewULID(),
-		Concept: "test-concept",
-		Content: "test content here",
+		Concept: "c",
+		Content: "x",
 	}
-
-	ctx := context.Background()
-	result, err := pipeline.Run(ctx, eng)
-
-	if err != nil {
-		t.Fatalf("pipeline.Run failed: %v", err)
+	result, err := pipeline.Run(context.Background(), eng)
+	if err == nil {
+		t.Fatalf("expected error from failed unified call, got result=%+v", result)
 	}
-
-	if result == nil {
-		t.Fatalf("expected non-nil result")
+	if !strings.Contains(err.Error(), "unified call failed") {
+		t.Fatalf("expected unified-call error, got: %v", err)
 	}
-
-	// First call failed, so no entities. But Call 2 should be skipped (no entities).
-	// Calls 3 and 4 should proceed.
-	if len(result.Entities) != 0 {
-		t.Fatalf("expected 0 entities (first call failed), got: %d", len(result.Entities))
+	if result != nil {
+		t.Fatalf("expected nil result on hard failure with no carry-forward")
 	}
-
-	// Other calls should have succeeded
-	if result.MemoryType == "" {
-		t.Fatalf("expected non-empty memory_type from Call 3")
-	}
-
-	// The second call (relationships) should be skipped because there are no entities
-	// So we expect 3 successful calls, not 4
-	// mock.callCount should be 3 or 4 depending on how we count the initial failure
 }
 
-// TestPipelineRun_AllFail tests error when all calls fail.
-func TestPipelineRun_AllFail(t *testing.T) {
+// TestPipelineRun_ProviderError_CarryForwardWins verifies that when the LLM
+// call fails but the engram had inline data that was carried forward, the
+// pipeline returns the carry-forward result rather than failing.
+func TestPipelineRun_ProviderError_CarryForwardWins(t *testing.T) {
 	mock := NewMockLLMProvider()
-	mock.failCount = 100 // Fail all calls
+	mock.failCount = 1
 
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
 	pipeline := NewPipeline(mock, limiter)
 
 	eng := &storage.Engram{
-		ID:      storage.NewULID(),
-		Concept: "test-concept",
-		Content: "test content here",
+		ID:         storage.NewULID(),
+		Concept:    "c",
+		Content:    "x",
+		MemoryType: storage.TypeObservation,
+		TypeLabel:  "observation",
 	}
-
-	ctx := context.Background()
-	result, err := pipeline.Run(ctx, eng)
-
-	if err == nil {
-		t.Fatalf("expected error when all calls fail")
+	result, err := pipeline.Run(context.Background(), eng)
+	if err != nil {
+		t.Fatalf("expected carry-forward to suppress error, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "entities:") {
-		t.Fatalf("expected aggregated stage errors, got: %v", err)
-	}
-
-	if result != nil {
-		t.Fatalf("expected nil result when all calls fail")
+	if result == nil || result.MemoryType != "observation" {
+		t.Fatalf("expected carry-forward classification, got: %+v", result)
 	}
 }
 
@@ -191,128 +186,71 @@ func TestPipelineRun_ContextTimeout(t *testing.T) {
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
 	pipeline := NewPipeline(mock, limiter)
 
-	eng := &storage.Engram{
-		ID:      storage.NewULID(),
-		Concept: "test-concept",
-		Content: "test content here",
-	}
+	eng := &storage.Engram{ID: storage.NewULID(), Concept: "c", Content: "x"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
 	defer cancel()
 
 	result, err := pipeline.Run(ctx, eng)
-
-	// Should timeout or return an error
 	if err == nil && result == nil {
-		t.Fatalf("expected error or nil result on timeout")
+		t.Fatal("expected error or nil result on timeout")
 	}
 }
 
-// TestPipelineRelationshipSkippedWithoutEntities tests that Call 2 is skipped when Call 1 has no entities.
-func TestPipelineRelationshipSkippedWithoutEntities(t *testing.T) {
-	mock := NewMockLLMProvider()
-	limiter := NewTokenBucketLimiter(100.0, 100.0)
-	pipeline := NewPipeline(mock, limiter)
-
-	// Set up custom complete to return empty entities
-	mock.entityResponse = `{"entities": []}`
-
-	eng := &storage.Engram{
-		ID:      storage.NewULID(),
-		Concept: "test-concept",
-		Content: "test content here",
-	}
-
-	ctx := context.Background()
-	result, err := pipeline.Run(ctx, eng)
-
-	if err != nil {
-		t.Fatalf("pipeline.Run failed: %v", err)
-	}
-
-	if result == nil {
-		t.Fatalf("expected non-nil result")
-	}
-
-	// Relationships should be empty because Call 1 returned no entities
-	if len(result.Relationships) != 0 {
-		t.Fatalf("expected 0 relationships (no entities), got: %d", len(result.Relationships))
-	}
-}
-
-// --- Task 8: Background Enrichment Restructure Tests ---
-
-func boolPtr(b bool) *bool { return &b }
-
-// TestLightMode_OnlyOneLLMCall verifies light mode runs only summarization.
+// TestLightMode_OnlyOneLLMCall verifies light mode still results in exactly
+// one LLM call. (Same call count as full mode in the unified architecture —
+// the difference is the prompt asks only for summary.)
 func TestLightMode_OnlyOneLLMCall(t *testing.T) {
 	var callCount atomic.Int32
+	var capturedSystem string
 	mock := NewMockLLMProvider()
 	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
 		callCount.Add(1)
-		if strings.Contains(system, "summarization") {
-			return `{"summary": "Light summary.", "key_points": ["kp1"]}`, nil
-		}
-		return `{}`, nil
+		capturedSystem = system
+		return `{"summary": "Light summary.", "key_points": ["kp1"]}`, nil
 	}
 
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
 	pipeline := NewPipeline(mock, limiter)
 	pipeline.SetConfig(&config.PluginConfig{EnrichMode: "light"})
 
-	eng := &storage.Engram{
-		ID:      storage.NewULID(),
-		Concept: "test",
-		Content: "content",
-	}
+	eng := &storage.Engram{ID: storage.NewULID(), Concept: "test", Content: "content"}
 
 	result, err := pipeline.Run(context.Background(), eng)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-
 	if callCount.Load() != 1 {
 		t.Fatalf("light mode should make exactly 1 LLM call, got %d", callCount.Load())
+	}
+	// In light mode only the summary stage block should appear in the prompt.
+	if !strings.Contains(capturedSystem, "## summary") {
+		t.Errorf("light-mode prompt missing summary block: %q", capturedSystem)
+	}
+	if strings.Contains(capturedSystem, "## entities") {
+		t.Errorf("light-mode prompt unexpectedly contains entities block")
 	}
 	if result.Summary != "Light summary." {
 		t.Fatalf("expected light summary, got %q", result.Summary)
 	}
-	if len(result.KeyPoints) != 1 || result.KeyPoints[0] != "kp1" {
-		t.Fatalf("expected 1 key point, got %v", result.KeyPoints)
-	}
 	if len(result.Entities) != 0 {
 		t.Fatalf("light mode should produce no entities, got %d", len(result.Entities))
 	}
-	if len(result.Relationships) != 0 {
-		t.Fatalf("light mode should produce no relationships, got %d", len(result.Relationships))
-	}
-	if result.MemoryType != "" {
-		t.Fatalf("light mode should produce no classification, got %q", result.MemoryType)
-	}
 }
 
-// TestDisableEntitiesStage skips entity extraction when disabled.
+// TestDisableEntitiesStage drops entities (and relationships) from the prompt
+// and from the result when the entities stage is disabled.
 func TestDisableEntitiesStage(t *testing.T) {
-	var calledStages []string
+	var capturedSystem string
 	mock := NewMockLLMProvider()
 	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
-		if strings.Contains(system, "entity extraction") {
-			calledStages = append(calledStages, "entities")
-			return `{"entities": [{"name": "X", "type": "tool", "confidence": 0.9}]}`, nil
-		}
-		if strings.Contains(system, "relationship") {
-			calledStages = append(calledStages, "relationships")
-			return `{"relationships": []}`, nil
-		}
-		if strings.Contains(system, "summarization") {
-			calledStages = append(calledStages, "summary")
-			return `{"summary": "sum", "key_points": ["kp"]}`, nil
-		}
-		if strings.Contains(system, "memory classification") {
-			calledStages = append(calledStages, "classification")
-			return `{"memory_type": "fact", "category": "test", "subcategory": "sub", "tags": []}`, nil
-		}
-		return `{}`, nil
+		capturedSystem = system
+		// Mock returns entities anyway — the parser must drop them.
+		return `{
+			"entities": [{"name": "X", "type": "tool", "confidence": 0.9}],
+			"summary": "sum", "key_points": ["kp"],
+			"memory_type": "fact", "category": "c", "subcategory": "s", "tags": []
+		}`, nil
 	}
 
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
@@ -324,24 +262,22 @@ func TestDisableEntitiesStage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-
-	for _, s := range calledStages {
-		if s == "entities" {
-			t.Fatal("entity extraction should have been skipped")
-		}
-		if s == "relationships" {
-			t.Fatal("relationship extraction should have been skipped (no entities)")
-		}
+	if strings.Contains(capturedSystem, "## entities") {
+		t.Error("entities block must not appear when stage is disabled")
+	}
+	if strings.Contains(capturedSystem, "## relationships") {
+		t.Error("relationships block must not appear when entities stage is disabled")
 	}
 	if len(result.Entities) != 0 {
-		t.Fatalf("expected 0 entities, got %d", len(result.Entities))
+		t.Fatalf("expected 0 entities in result, got %d", len(result.Entities))
 	}
 	if result.Summary != "sum" {
-		t.Fatalf("summary should still run, got %q", result.Summary)
+		t.Fatalf("summary should still appear, got %q", result.Summary)
 	}
 }
 
-// TestDisableClassificationStage skips classification when disabled.
+// TestDisableClassificationStage drops classification fields from the result
+// when the classification stage is disabled.
 func TestDisableClassificationStage(t *testing.T) {
 	mock := NewMockLLMProvider()
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
@@ -353,13 +289,12 @@ func TestDisableClassificationStage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-
 	if result.MemoryType != "" {
 		t.Fatalf("classification should be empty when disabled, got %q", result.MemoryType)
 	}
 }
 
-// TestDisableSummaryStage skips summarization when disabled.
+// TestDisableSummaryStage drops summary fields from the result.
 func TestDisableSummaryStage(t *testing.T) {
 	mock := NewMockLLMProvider()
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
@@ -371,17 +306,52 @@ func TestDisableSummaryStage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-
 	if result.Summary != "" {
 		t.Fatalf("summary should be empty when disabled, got %q", result.Summary)
 	}
-	// Classification and entities should still have been attempted
 	if result.MemoryType == "" {
 		t.Fatal("classification should still run when only summary is disabled")
 	}
 }
 
-// TestClassificationExpandedEnum verifies all 12 memory types map correctly.
+// TestDisableRelationshipsStage_EntitiesStillExtracted: disabling relationships
+// doesn't affect entity extraction.
+func TestDisableRelationshipsStage_EntitiesStillExtracted(t *testing.T) {
+	var capturedSystem string
+	mock := NewMockLLMProvider()
+	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
+		capturedSystem = system
+		return `{
+			"entities": [{"name": "Go", "type": "language", "confidence": 0.95}],
+			"summary": "s", "key_points": ["k"],
+			"memory_type": "fact", "category": "c", "subcategory": "s", "tags": []
+		}`, nil
+	}
+
+	limiter := NewTokenBucketLimiter(100.0, 100.0)
+	pipeline := NewPipeline(mock, limiter)
+	pipeline.SetConfig(&config.PluginConfig{EnrichRelationships: boolPtr(false)})
+
+	eng := &storage.Engram{ID: storage.NewULID(), Concept: "c", Content: "x"}
+	result, err := pipeline.Run(context.Background(), eng)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if strings.Contains(capturedSystem, "## relationships") {
+		t.Error("relationships block must not appear when stage is disabled")
+	}
+	if !strings.Contains(capturedSystem, "## entities") {
+		t.Error("entities block must still appear")
+	}
+	if len(result.Entities) != 1 {
+		t.Fatalf("entities should still be extracted, got %d", len(result.Entities))
+	}
+	if len(result.Relationships) != 0 {
+		t.Fatalf("relationships should be empty when disabled, got %d", len(result.Relationships))
+	}
+}
+
+// TestClassificationExpandedEnum verifies all memory types map correctly.
 func TestClassificationExpandedEnum(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -427,25 +397,18 @@ func TestClassificationWithTypeLabel(t *testing.T) {
 	}
 }
 
-// TestSkipIfPresent_Summary verifies summary is skipped when engram already has one.
+// TestSkipIfPresent_Summary verifies summary is skipped when engram has one;
+// the carry-forward path populates result.Summary with the engram's existing
+// value. The remaining stages still fire in a single unified call.
 func TestSkipIfPresent_Summary(t *testing.T) {
-	var calledSummary bool
+	var capturedSystem string
 	mock := NewMockLLMProvider()
 	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
-		if strings.Contains(system, "summarization") {
-			calledSummary = true
-			return `{"summary": "new", "key_points": ["new"]}`, nil
-		}
-		if strings.Contains(system, "entity extraction") {
-			return `{"entities": [{"name": "X", "type": "tool", "confidence": 0.9}]}`, nil
-		}
-		if strings.Contains(system, "relationship") {
-			return `{"relationships": []}`, nil
-		}
-		if strings.Contains(system, "memory classification") {
-			return `{"memory_type": "fact", "category": "c", "subcategory": "s", "tags": []}`, nil
-		}
-		return `{}`, nil
+		capturedSystem = system
+		return `{
+			"entities": [{"name": "X", "type": "tool", "confidence": 0.9}],
+			"memory_type": "fact", "category": "c", "subcategory": "s", "tags": []
+		}`, nil
 	}
 
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
@@ -457,35 +420,30 @@ func TestSkipIfPresent_Summary(t *testing.T) {
 		Content: "x",
 		Summary: "existing summary",
 	}
-
-	_, err := pipeline.Run(context.Background(), eng)
+	result, err := pipeline.Run(context.Background(), eng)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if calledSummary {
-		t.Fatal("summary LLM call should have been skipped (engram already has summary)")
+	if strings.Contains(capturedSystem, "## summary") {
+		t.Error("summary block must not appear when summary already exists on engram")
+	}
+	if result.Summary != "existing summary" {
+		t.Fatalf("expected carried-forward summary, got %q", result.Summary)
 	}
 }
 
-// TestSkipIfPresent_Classification verifies classification is skipped for typed engrams.
+// TestSkipIfPresent_Classification: with engram MemoryType set, the
+// classification stage is excluded from the prompt and carry-forward
+// populates the result.
 func TestSkipIfPresent_Classification(t *testing.T) {
-	var calledClassify bool
+	var capturedSystem string
 	mock := NewMockLLMProvider()
 	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
-		if strings.Contains(system, "memory classification") {
-			calledClassify = true
-			return `{"memory_type": "task"}`, nil
-		}
-		if strings.Contains(system, "entity extraction") {
-			return `{"entities": [{"name": "X", "type": "tool", "confidence": 0.9}]}`, nil
-		}
-		if strings.Contains(system, "relationship") {
-			return `{"relationships": []}`, nil
-		}
-		if strings.Contains(system, "summarization") {
-			return `{"summary": "s", "key_points": ["k"]}`, nil
-		}
-		return `{}`, nil
+		capturedSystem = system
+		return `{
+			"entities": [{"name": "X", "type": "tool", "confidence": 0.9}],
+			"summary": "s", "key_points": ["k"]
+		}`, nil
 	}
 
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
@@ -497,64 +455,59 @@ func TestSkipIfPresent_Classification(t *testing.T) {
 		Content:    "x",
 		MemoryType: storage.TypeDecision,
 	}
-
-	_, err := pipeline.Run(context.Background(), eng)
+	result, err := pipeline.Run(context.Background(), eng)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if calledClassify {
-		t.Fatal("classification LLM call should have been skipped (engram already has MemoryType)")
+	if strings.Contains(capturedSystem, "## classification") {
+		t.Error("classification block must not appear when MemoryType already set")
+	}
+	if result.MemoryType != "decision" {
+		t.Fatalf("expected carried-forward MemoryType, got %q", result.MemoryType)
 	}
 }
 
-// TestSkipIfPresent_Entities verifies entity extraction is skipped only when both
-// KeyPoints AND Summary are present (caller provided full enrichment).
-// With only KeyPoints set (no Summary), entity extraction must NOT be skipped —
-// KeyPoints alone may have been set by summarization and do not proxy for entity extraction.
+// TestSkipIfPresent_Entities documents that entity extraction is skipped only
+// when both KeyPoints AND Summary are present (caller provided full
+// enrichment). Only KeyPoints — no skip.
 func TestSkipIfPresent_Entities(t *testing.T) {
-	var calledEntities bool
-	mock := NewMockLLMProvider()
-	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
-		if strings.Contains(system, "entity extraction") {
-			calledEntities = true
-			return `{"entities": []}`, nil
-		}
-		if strings.Contains(system, "summarization") {
-			return `{"summary": "s", "key_points": ["k"]}`, nil
-		}
-		if strings.Contains(system, "memory classification") {
-			return `{"memory_type": "fact", "category": "c", "subcategory": "s", "tags": []}`, nil
-		}
-		return `{}`, nil
-	}
-
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
-	pipeline := NewPipeline(mock, limiter)
 
 	t.Run("KeyPointsOnly_MustNotSkip", func(t *testing.T) {
-		// With only KeyPoints set (no Summary), entity extraction must proceed.
-		// The old code used KeyPoints alone as a skip-proxy — this was the bug.
-		calledEntities = false
+		var capturedSystem string
+		mock := NewMockLLMProvider()
+		mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
+			capturedSystem = system
+			return `{
+				"entities": [{"name": "Z", "type": "tool", "confidence": 0.8}],
+				"summary": "s", "key_points": ["k"],
+				"memory_type": "fact", "category": "c", "subcategory": "s", "tags": []
+			}`, nil
+		}
+		pipeline := NewPipeline(mock, limiter)
 		eng := &storage.Engram{
 			ID:        storage.NewULID(),
 			Concept:   "c",
 			Content:   "x",
 			KeyPoints: []string{"existing key point"},
-			// Summary intentionally empty
 		}
 		_, err := pipeline.Run(context.Background(), eng)
 		if err != nil {
 			t.Fatalf("Run failed: %v", err)
 		}
-		if !calledEntities {
-			t.Fatal("entity extraction must NOT be skipped when only KeyPoints are set (no Summary)")
+		if !strings.Contains(capturedSystem, "## entities") {
+			t.Fatal("entities block must appear when only KeyPoints are set (no Summary)")
 		}
 	})
 
 	t.Run("KeyPointsAndSummary_MaySkip", func(t *testing.T) {
-		// With both KeyPoints AND Summary set, caller provided full enrichment —
-		// entity extraction may be skipped (conservative heuristic).
-		calledEntities = false
+		var capturedSystem string
+		mock := NewMockLLMProvider()
+		mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
+			capturedSystem = system
+			return `{"memory_type": "fact", "category": "c", "subcategory": "s", "tags": []}`, nil
+		}
+		pipeline := NewPipeline(mock, limiter)
 		eng := &storage.Engram{
 			ID:        storage.NewULID(),
 			Concept:   "c",
@@ -566,73 +519,20 @@ func TestSkipIfPresent_Entities(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run failed: %v", err)
 		}
-		if calledEntities {
-			t.Fatal("entity extraction should be skipped when both KeyPoints and Summary are present")
+		if strings.Contains(capturedSystem, "## entities") {
+			t.Fatal("entities block must not appear when both KeyPoints and Summary set")
 		}
 	})
 }
 
-// TestFullModeBackwardCompat verifies full mode (default) runs all 4 calls.
-func TestFullModeBackwardCompat(t *testing.T) {
-	var callCount atomic.Int32
-	mock := NewMockLLMProvider()
-	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
-		callCount.Add(1)
-		if strings.Contains(system, "entity extraction") {
-			return `{"entities": [{"name": "Go", "type": "language", "confidence": 0.95}]}`, nil
-		}
-		if strings.Contains(system, "relationship") {
-			return `{"relationships": [{"from": "app", "to": "Go", "type": "uses", "weight": 0.9}]}`, nil
-		}
-		if strings.Contains(system, "summarization") {
-			return `{"summary": "Full summary.", "key_points": ["kp1", "kp2"]}`, nil
-		}
-		if strings.Contains(system, "memory classification") {
-			return `{"memory_type": "fact", "type_label": "tech_fact", "category": "tech", "subcategory": "lang", "tags": ["go"]}`, nil
-		}
-		return `{}`, nil
-	}
-
-	limiter := NewTokenBucketLimiter(100.0, 100.0)
-	pipeline := NewPipeline(mock, limiter)
-	// No config set = full mode (default)
-
-	eng := &storage.Engram{ID: storage.NewULID(), Concept: "c", Content: "x"}
-	result, err := pipeline.Run(context.Background(), eng)
-	if err != nil {
-		t.Fatalf("Run failed: %v", err)
-	}
-
-	if callCount.Load() != 4 {
-		t.Fatalf("full mode should make 4 LLM calls, got %d", callCount.Load())
-	}
-	if result.Summary != "Full summary." {
-		t.Fatalf("expected summary, got %q", result.Summary)
-	}
-	if len(result.Entities) != 1 {
-		t.Fatalf("expected 1 entity, got %d", len(result.Entities))
-	}
-	if len(result.Relationships) != 1 {
-		t.Fatalf("expected 1 relationship, got %d", len(result.Relationships))
-	}
-	if result.MemoryType != "fact" {
-		t.Fatalf("expected canonical memory_type 'fact', got %q", result.MemoryType)
-	}
-	if result.TypeLabel != "tech_fact" {
-		t.Fatalf("expected type_label 'tech_fact', got %q", result.TypeLabel)
-	}
-}
-
 // TestPipelineRun_AllStagesSkipped_CarriesInlineData verifies that when all
-// pipeline stages are skipped because the engram already has inline data, the
-// result carries forward that inline data so PersistEnrichmentResult/UpdateDigest
-// can set the corresponding digest flags (DigestClassified, DigestSummarized).
+// stages are skipped because the engram already has inline data, no LLM call
+// is made and the inline data is carried forward into the result.
 func TestPipelineRun_AllStagesSkipped_CarriesInlineData(t *testing.T) {
 	mock := NewMockLLMProvider()
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
 	pipeline := NewPipeline(mock, limiter)
 
-	// Fully pre-enriched engram: all stages will be skipped.
 	eng := &storage.Engram{
 		ID:         storage.NewULID(),
 		Concept:    "pre-enriched",
@@ -641,7 +541,6 @@ func TestPipelineRun_AllStagesSkipped_CarriesInlineData(t *testing.T) {
 		KeyPoints:  []string{"kp1"},
 		MemoryType: storage.TypeDecision,
 	}
-
 	result, err := pipeline.Run(context.Background(), eng)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
@@ -652,7 +551,6 @@ func TestPipelineRun_AllStagesSkipped_CarriesInlineData(t *testing.T) {
 	if mock.callCount != 0 {
 		t.Fatalf("expected 0 LLM calls, got %d", mock.callCount)
 	}
-	// Inline data should be carried forward into the result.
 	if result.Summary != "existing summary" {
 		t.Fatalf("expected carried-forward summary, got %q", result.Summary)
 	}
@@ -665,30 +563,11 @@ func TestPipelineRun_AllStagesSkipped_CarriesInlineData(t *testing.T) {
 }
 
 // TestSkipClassification_CarriesInlineDataForDigestFlag verifies that when an
-// engram is written with MemoryType=observation and TypeLabel="observation",
-// the pipeline skips the classification LLM call but carries the inline data
-// into the result so that PersistEnrichmentResult -> UpdateDigest sets
-// DigestClassified. This is the root cause of the digest flag bug.
+// engram has inline classification (the digest-flag bug scenario), the
+// pipeline carries it forward into the result so UpdateDigest sets
+// DigestClassified.
 func TestSkipClassification_CarriesInlineDataForDigestFlag(t *testing.T) {
-	var calledClassify bool
 	mock := NewMockLLMProvider()
-	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
-		if strings.Contains(system, "memory classification") {
-			calledClassify = true
-			return `{"memory_type": "task"}`, nil
-		}
-		if strings.Contains(system, "entity extraction") {
-			return `{"entities": [{"name": "X", "type": "tool", "confidence": 0.9}]}`, nil
-		}
-		if strings.Contains(system, "relationship") {
-			return `{"relationships": []}`, nil
-		}
-		if strings.Contains(system, "summarization") {
-			return `{"summary": "s", "key_points": ["k"]}`, nil
-		}
-		return `{}`, nil
-	}
-
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
 	pipeline := NewPipeline(mock, limiter)
 
@@ -699,17 +578,10 @@ func TestSkipClassification_CarriesInlineDataForDigestFlag(t *testing.T) {
 		MemoryType: storage.TypeObservation,
 		TypeLabel:  "observation",
 	}
-
 	result, err := pipeline.Run(context.Background(), eng)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if calledClassify {
-		t.Fatal("classification LLM call should have been skipped (engram already classified)")
-	}
-
-	// The result must carry forward the inline classification so that
-	// UpdateDigest sees non-empty MemoryType/TypeLabel and sets DigestClassified.
 	if result.MemoryType != "observation" {
 		t.Fatalf("expected carried-forward MemoryType 'observation', got %q", result.MemoryType)
 	}
@@ -718,29 +590,10 @@ func TestSkipClassification_CarriesInlineDataForDigestFlag(t *testing.T) {
 	}
 }
 
-// TestSkipSummary_CarriesInlineDataForDigestFlag verifies that when an engram
-// is written with a pre-set Summary, the pipeline skips the summarization LLM
-// call but carries the inline data into the result for DigestSummarized.
+// TestSkipSummary_CarriesInlineDataForDigestFlag mirrors the classification
+// case for the Summary stage.
 func TestSkipSummary_CarriesInlineDataForDigestFlag(t *testing.T) {
-	var calledSummary bool
 	mock := NewMockLLMProvider()
-	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
-		if strings.Contains(system, "summarization") {
-			calledSummary = true
-			return `{"summary": "new", "key_points": ["new"]}`, nil
-		}
-		if strings.Contains(system, "entity extraction") {
-			return `{"entities": [{"name": "X", "type": "tool", "confidence": 0.9}]}`, nil
-		}
-		if strings.Contains(system, "relationship") {
-			return `{"relationships": []}`, nil
-		}
-		if strings.Contains(system, "memory classification") {
-			return `{"memory_type": "fact", "category": "c", "subcategory": "s", "tags": []}`, nil
-		}
-		return `{}`, nil
-	}
-
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
 	pipeline := NewPipeline(mock, limiter)
 
@@ -751,61 +604,124 @@ func TestSkipSummary_CarriesInlineDataForDigestFlag(t *testing.T) {
 		Summary:   "pre-set summary",
 		KeyPoints: []string{"pre-set kp"},
 	}
-
 	result, err := pipeline.Run(context.Background(), eng)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if calledSummary {
-		t.Fatal("summarization LLM call should have been skipped (engram already has summary)")
-	}
-
-	// The result must carry forward the inline summary so that
-	// UpdateDigest sees non-empty Summary and sets DigestSummarized.
 	if result.Summary != "pre-set summary" {
-		t.Fatalf("expected carried-forward Summary 'pre-set summary', got %q", result.Summary)
+		t.Fatalf("expected carried-forward Summary, got %q", result.Summary)
 	}
 	if len(result.KeyPoints) != 1 || result.KeyPoints[0] != "pre-set kp" {
 		t.Fatalf("expected carried-forward KeyPoints, got %v", result.KeyPoints)
 	}
 }
 
-// TestDisableRelationshipsStage_EntitiesStillExtracted verifies that disabling
-// relationships doesn't affect entity extraction.
-func TestDisableRelationshipsStage_EntitiesStillExtracted(t *testing.T) {
-	var calledRels bool
-	mock := NewMockLLMProvider()
-	mock.customComplete = func(_ context.Context, system, _ string) (string, error) {
-		if strings.Contains(system, "entity extraction") {
-			return `{"entities": [{"name": "Go", "type": "language", "confidence": 0.95}]}`, nil
-		}
-		if strings.Contains(system, "relationship") {
-			calledRels = true
-			return `{"relationships": []}`, nil
-		}
-		if strings.Contains(system, "summarization") {
-			return `{"summary": "s", "key_points": ["k"]}`, nil
-		}
-		if strings.Contains(system, "memory classification") {
-			return `{"memory_type": "fact", "category": "c", "subcategory": "s", "tags": []}`, nil
-		}
-		return `{}`, nil
-	}
-
+// TestStagesToRun_TableDriven exercises the stage-selection helper directly so
+// regressions in the dynamic-prompt logic surface fast.
+func TestStagesToRun_TableDriven(t *testing.T) {
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
-	pipeline := NewPipeline(mock, limiter)
-	pipeline.SetConfig(&config.PluginConfig{EnrichRelationships: boolPtr(false)})
 
-	eng := &storage.Engram{ID: storage.NewULID(), Concept: "c", Content: "x"}
-	result, err := pipeline.Run(context.Background(), eng)
-	if err != nil {
-		t.Fatalf("Run failed: %v", err)
+	tests := []struct {
+		name string
+		cfg  *config.PluginConfig
+		eng  *storage.Engram
+		want []string
+	}{
+		{
+			name: "default config, fresh engram",
+			cfg:  nil,
+			eng:  &storage.Engram{},
+			want: []string{"entities", "relationships", "classification", "summary"},
+		},
+		{
+			name: "light mode",
+			cfg:  &config.PluginConfig{EnrichMode: "light"},
+			eng:  &storage.Engram{},
+			want: []string{"summary"},
+		},
+		{
+			name: "summary disabled",
+			cfg:  &config.PluginConfig{EnrichSummary: boolPtr(false)},
+			eng:  &storage.Engram{},
+			want: []string{"entities", "relationships", "classification"},
+		},
+		{
+			name: "entities disabled drops relationships too",
+			cfg:  &config.PluginConfig{EnrichEntities: boolPtr(false)},
+			eng:  &storage.Engram{},
+			want: []string{"classification", "summary"},
+		},
+		{
+			name: "summary already inline, classification already inline",
+			cfg:  nil,
+			eng:  &storage.Engram{Summary: "s", MemoryType: storage.TypeDecision},
+			want: []string{"entities", "relationships"},
+		},
+		{
+			name: "fully pre-enriched -> no stages",
+			cfg:  nil,
+			eng: &storage.Engram{
+				Summary:    "s",
+				KeyPoints:  []string{"k"},
+				MemoryType: storage.TypeDecision,
+			},
+			want: nil,
+		},
 	}
 
-	if calledRels {
-		t.Fatal("relationship extraction should have been skipped")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewPipeline(NewMockLLMProvider(), limiter)
+			p.SetConfig(tt.cfg)
+			got := p.stagesToRun(tt.eng)
+			if !stringSliceEqual(got, tt.want) {
+				t.Fatalf("stagesToRun: got %v, want %v", got, tt.want)
+			}
+		})
 	}
-	if len(result.Entities) != 1 {
-		t.Fatalf("entities should still be extracted, got %d", len(result.Entities))
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestBuildUnifiedPrompt verifies the prompt builder is byte-stable for a
+// given enabled-set and respects canonical stage order.
+func TestBuildUnifiedPrompt(t *testing.T) {
+	// Same stages, different input order — outputs must match.
+	a := BuildUnifiedPrompt([]string{"summary", "entities", "classification", "relationships"})
+	b := BuildUnifiedPrompt([]string{"entities", "relationships", "classification", "summary"})
+	if a != b {
+		t.Fatalf("BuildUnifiedPrompt must be order-independent; got mismatched outputs")
+	}
+
+	// Empty input -> empty output.
+	if BuildUnifiedPrompt(nil) != "" {
+		t.Fatal("empty input should yield empty prompt")
+	}
+	if BuildUnifiedPrompt([]string{}) != "" {
+		t.Fatal("empty slice should yield empty prompt")
+	}
+
+	// Only enabled stages appear in the prompt.
+	only := BuildUnifiedPrompt([]string{"summary"})
+	if !strings.Contains(only, "## summary") {
+		t.Fatal("expected summary block")
+	}
+	if strings.Contains(only, "## entities") || strings.Contains(only, "## relationships") || strings.Contains(only, "## classification") {
+		t.Fatal("disabled stage blocks must not appear")
+	}
+
+	// Unknown stages are filtered out.
+	if BuildUnifiedPrompt([]string{"unknown"}) != "" {
+		t.Fatal("unknown-only stages should yield empty prompt")
 	}
 }

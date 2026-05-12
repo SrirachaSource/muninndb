@@ -6,100 +6,131 @@ import (
 	"github.com/scrypster/muninndb/internal/plugin"
 )
 
-// TestParseSummary tests parsing of summarization responses.
-func TestParseSummary_ValidJSON(t *testing.T) {
-	raw := `{"summary": "This is a summary.", "key_points": ["point 1", "point 2"]}`
-	summary, keyPoints, err := ParseSummarizeResponse(raw)
+// TestParseUnifiedResponse_AllFields verifies the unified parser populates
+// every requested field from a complete LLM response.
+func TestParseUnifiedResponse_AllFields(t *testing.T) {
+	raw := `{
+		"entities": [{"name": "PostgreSQL", "type": "database", "confidence": 0.95}],
+		"relationships": [{"from": "PostgreSQL", "to": "PostgreSQL", "type": "alternative_to", "weight": 0.5}],
+		"memory_type": "decision",
+		"type_label": "architectural_decision",
+		"category": "infrastructure",
+		"subcategory": "databases",
+		"tags": ["db", "postgres"],
+		"summary": "Picked PostgreSQL for ACID guarantees.",
+		"key_points": ["ACID matters", "no SQL fallback"]
+	}`
+	enabled := []string{"entities", "relationships", "classification", "summary"}
 
+	res, err := ParseUnifiedResponse(raw, enabled)
 	if err != nil {
-		t.Fatalf("ParseSummarizeResponse failed: %v", err)
+		t.Fatalf("ParseUnifiedResponse: %v", err)
 	}
-
-	if summary != "This is a summary." {
-		t.Fatalf("Expected summary 'This is a summary.', got: %q", summary)
+	if len(res.Entities) != 1 || res.Entities[0].Name != "PostgreSQL" {
+		t.Fatalf("unexpected entities: %+v", res.Entities)
 	}
-
-	if len(keyPoints) != 2 || keyPoints[0] != "point 1" || keyPoints[1] != "point 2" {
-		t.Fatalf("Unexpected key points: %v", keyPoints)
+	if len(res.Relationships) != 1 || res.Relationships[0].FromEntity != "PostgreSQL" {
+		t.Fatalf("unexpected relationships: %+v", res.Relationships)
+	}
+	if res.MemoryType != "decision" || res.TypeLabel != "architectural_decision" {
+		t.Fatalf("unexpected classification: %+v", res)
+	}
+	if res.Category != "infrastructure" || res.Subcategory != "databases" {
+		t.Fatalf("unexpected category/subcategory: %s/%s", res.Category, res.Subcategory)
+	}
+	if len(res.Tags) != 2 {
+		t.Fatalf("unexpected tags: %v", res.Tags)
+	}
+	if res.Summary == "" || len(res.KeyPoints) != 2 {
+		t.Fatalf("unexpected summary/key_points: %q / %v", res.Summary, res.KeyPoints)
 	}
 }
 
-// TestParseKeyPoints_Fallback tests graceful degradation when JSON parsing fails.
-func TestParseSummary_Fallback(t *testing.T) {
-	raw := `Here is the result: {"summary": "Test", "key_points": []}`
-	summary, _, err := ParseSummarizeResponse(raw)
-
-	// Should still work with preamble text
+// TestParseUnifiedResponse_OmitsDisabledFields verifies that fields produced
+// by the LLM for stages NOT in the enabled list are dropped.
+func TestParseUnifiedResponse_OmitsDisabledFields(t *testing.T) {
+	raw := `{
+		"entities": [{"name": "foo", "type": "tool", "confidence": 1.0}],
+		"summary": "should not appear",
+		"key_points": ["x"]
+	}`
+	res, err := ParseUnifiedResponse(raw, []string{"entities"})
 	if err != nil {
-		t.Fatalf("ParseSummarizeResponse failed: %v", err)
+		t.Fatalf("ParseUnifiedResponse: %v", err)
 	}
-
-	if summary != "Test" {
-		t.Fatalf("Expected summary 'Test', got: %q", summary)
+	if res.Summary != "" || len(res.KeyPoints) != 0 {
+		t.Fatalf("expected summary/key_points dropped when stage disabled, got %q / %v", res.Summary, res.KeyPoints)
+	}
+	if len(res.Entities) != 1 {
+		t.Fatalf("expected 1 entity, got %d", len(res.Entities))
 	}
 }
 
-// TestParseEntities_ValidJSON tests parsing of entity responses.
-func TestParseEntities_ValidJSON(t *testing.T) {
-	raw := `{"entities": [{"name": "PostgreSQL", "type": "database", "confidence": 0.95}]}`
-	entities, err := ParseEntityResponse(raw)
-
+// TestParseUnifiedResponse_DropsHallucinatedRelationships covers the safety
+// filter: relationships whose endpoints aren't in the extracted entities are
+// dropped.
+func TestParseUnifiedResponse_DropsHallucinatedRelationships(t *testing.T) {
+	raw := `{
+		"entities": [{"name": "A", "type": "service", "confidence": 1.0}],
+		"relationships": [
+			{"from": "A", "to": "GhostX", "type": "uses", "weight": 0.9},
+			{"from": "Ghost1", "to": "Ghost2", "type": "uses", "weight": 0.8}
+		]
+	}`
+	res, err := ParseUnifiedResponse(raw, []string{"entities", "relationships"})
 	if err != nil {
-		t.Fatalf("ParseEntityResponse failed: %v", err)
+		t.Fatalf("ParseUnifiedResponse: %v", err)
 	}
-
-	if len(entities) != 1 {
-		t.Fatalf("Expected 1 entity, got: %d", len(entities))
-	}
-
-	if entities[0].Name != "PostgreSQL" || entities[0].Type != "database" {
-		t.Fatalf("Unexpected entity: %+v", entities[0])
+	if len(res.Relationships) != 0 {
+		t.Fatalf("expected hallucinated relationships dropped, got %+v", res.Relationships)
 	}
 }
 
-// TestParseEntities_Empty tests parsing when no entities are found.
-func TestParseEntities_Empty(t *testing.T) {
-	raw := `{"entities": []}`
-	entities, err := ParseEntityResponse(raw)
-
+// TestParseUnifiedResponse_PartialJSON verifies that missing optional fields
+// produce a partial result rather than an error.
+func TestParseUnifiedResponse_PartialJSON(t *testing.T) {
+	raw := `{"summary": "only a summary", "key_points": ["a"]}`
+	res, err := ParseUnifiedResponse(raw, []string{"entities", "summary"})
 	if err != nil {
-		t.Fatalf("ParseEntityResponse failed: %v", err)
+		t.Fatalf("ParseUnifiedResponse: %v", err)
 	}
-
-	if len(entities) != 0 {
-		t.Fatalf("Expected 0 entities, got: %d", len(entities))
+	if res.Summary != "only a summary" {
+		t.Fatalf("unexpected summary: %q", res.Summary)
+	}
+	if len(res.Entities) != 0 {
+		t.Fatalf("expected 0 entities when LLM omitted the field, got %d", len(res.Entities))
 	}
 }
 
-// TestParseEntities_BadJSON tests graceful fallback for invalid JSON.
-func TestParseEntities_BadJSON(t *testing.T) {
-	raw := `This is not valid JSON`
-	entities, err := ParseEntityResponse(raw)
-
+// TestParseUnifiedResponse_AllEmpty returns an error so the pipeline can
+// distinguish "model returned nothing usable" from "model returned a partial
+// result".
+func TestParseUnifiedResponse_AllEmpty(t *testing.T) {
+	raw := `{}`
+	res, err := ParseUnifiedResponse(raw, []string{"entities", "summary"})
 	if err == nil {
-		t.Fatal("expected parse error for invalid entity JSON")
-	}
-
-	if len(entities) != 0 {
-		t.Fatalf("Expected 0 entities, got: %d", len(entities))
+		t.Fatalf("expected error for all-empty response, got %+v", res)
 	}
 }
 
-// TestParseClassification tests parsing of classification responses.
-func TestParseClassification_ValidJSON(t *testing.T) {
-	raw := `{"memory_type": "decision", "type_label": "architectural_decision", "category": "infrastructure", "subcategory": "databases", "tags": ["db", "postgres"]}`
-	memType, typeLabel, category, subcategory, tags, err := ParseClassificationResponse(raw)
+// TestParseUnifiedResponse_BadJSON returns an error.
+func TestParseUnifiedResponse_BadJSON(t *testing.T) {
+	_, err := ParseUnifiedResponse(`not valid json`, []string{"summary"})
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
 
+// TestParseUnifiedResponse_MarkdownFenced verifies that JSON wrapped in
+// markdown code fences is still parsed.
+func TestParseUnifiedResponse_MarkdownFenced(t *testing.T) {
+	raw := "```json\n{\"summary\":\"fenced\",\"key_points\":[\"a\"]}\n```"
+	res, err := ParseUnifiedResponse(raw, []string{"summary"})
 	if err != nil {
-		t.Fatalf("ParseClassificationResponse failed: %v", err)
+		t.Fatalf("ParseUnifiedResponse: %v", err)
 	}
-
-	if memType != "decision" || typeLabel != "architectural_decision" || category != "infrastructure" || subcategory != "databases" {
-		t.Fatalf("Unexpected classification: type=%q label=%q cat=%q subcat=%q", memType, typeLabel, category, subcategory)
-	}
-
-	if len(tags) != 2 || tags[0] != "db" {
-		t.Fatalf("Unexpected tags: %v", tags)
+	if res.Summary != "fenced" {
+		t.Fatalf("expected 'fenced', got %q", res.Summary)
 	}
 }
 
@@ -124,25 +155,6 @@ func TestExtractJSON_WithMarkdownFences(t *testing.T) {
 	}
 }
 
-// TestParseRelationships_ValidJSON tests parsing of relationship responses.
-func TestParseRelationships_ValidJSON(t *testing.T) {
-	// Note: RelType is used in struct, but JSON has "type" field
-	raw := `{"relationships": [{"from": "PostgreSQL", "to": "backend", "type": "uses", "weight": 0.9}]}`
-	rels, err := ParseRelationshipResponse(raw)
-
-	if err != nil {
-		t.Fatalf("ParseRelationshipResponse failed: %v", err)
-	}
-
-	if len(rels) != 1 {
-		t.Fatalf("Expected 1 relationship, got: %d", len(rels))
-	}
-
-	if rels[0].FromEntity != "PostgreSQL" || rels[0].ToEntity != "backend" {
-		t.Fatalf("Unexpected relationship: %+v", rels[0])
-	}
-}
-
 // TestNormalizeEntityType tests entity type normalization and validation.
 func TestNormalizeEntityType_Valid(t *testing.T) {
 	tests := map[string]string{
@@ -160,9 +172,9 @@ func TestNormalizeEntityType_Valid(t *testing.T) {
 		"product":    "product",
 		"event":      "event",
 		// Unknown types are passed through (not coerced to "service").
-		"unknown":  "unknown",
-		"library":  "library",
-		"LIBRARY":  "library", // still normalised to lowercase
+		"unknown": "unknown",
+		"library": "library",
+		"LIBRARY": "library", // still normalised to lowercase
 	}
 
 	for input, expected := range tests {
@@ -253,83 +265,6 @@ func TestValidateRelationships(t *testing.T) {
 	}
 }
 
-func TestParseEntityResponse_DirectArray(t *testing.T) {
-	raw := `[{"name": "Go", "type": "language", "confidence": 0.9}]`
-	entities, err := ParseEntityResponse(raw)
-	if err != nil {
-		t.Fatalf("ParseEntityResponse failed: %v", err)
-	}
-	if len(entities) != 1 || entities[0].Name != "Go" {
-		t.Fatalf("unexpected entities: %+v", entities)
-	}
-}
-
-func TestParseRelationshipResponse_DirectArray(t *testing.T) {
-	raw := `[{"from": "A", "to": "B", "type": "uses", "weight": 0.8}]`
-	rels, err := ParseRelationshipResponse(raw)
-	if err != nil {
-		t.Fatalf("ParseRelationshipResponse failed: %v", err)
-	}
-	if len(rels) != 1 || rels[0].FromEntity != "A" {
-		t.Fatalf("unexpected rels: %+v", rels)
-	}
-}
-
-func TestParseRelationshipResponse_BadJSON(t *testing.T) {
-	raw := `not valid json at all`
-	rels, err := ParseRelationshipResponse(raw)
-	if err == nil {
-		t.Fatal("expected parse error for invalid relationship JSON")
-	}
-	if len(rels) != 0 {
-		t.Fatalf("expected 0 relationships, got %d", len(rels))
-	}
-}
-
-func TestParseEntityResponse_NestedWrapperKeyReturnsError(t *testing.T) {
-	raw := `{"meta":{"entities":[]}}`
-	entities, err := ParseEntityResponse(raw)
-	if err == nil {
-		t.Fatal("expected parse error for nested entities wrapper")
-	}
-	if len(entities) != 0 {
-		t.Fatalf("expected 0 entities, got %d", len(entities))
-	}
-}
-
-func TestParseRelationshipResponse_NestedWrapperKeyReturnsError(t *testing.T) {
-	raw := `{"meta":{"relationships":[]}}`
-	rels, err := ParseRelationshipResponse(raw)
-	if err == nil {
-		t.Fatal("expected parse error for nested relationships wrapper")
-	}
-	if len(rels) != 0 {
-		t.Fatalf("expected 0 relationships, got %d", len(rels))
-	}
-}
-
-func TestParseClassification_BadJSON(t *testing.T) {
-	raw := `totally broken {{{`
-	memType, typeLabel, cat, subcat, tags, err := ParseClassificationResponse(raw)
-	if err == nil {
-		t.Fatal("expected parse error for invalid classification JSON")
-	}
-	if memType != "" || typeLabel != "" || cat != "" || subcat != "" || tags != nil {
-		t.Fatal("expected all empty on bad JSON")
-	}
-}
-
-func TestParseSummarize_BadJSON(t *testing.T) {
-	raw := `garbage in`
-	summary, keyPoints, err := ParseSummarizeResponse(raw)
-	if err == nil {
-		t.Fatal("expected parse error for invalid summarize JSON")
-	}
-	if summary != "" || keyPoints != nil {
-		t.Fatal("expected empty on bad JSON")
-	}
-}
-
 func TestExtractJSON_PlainCodeFences(t *testing.T) {
 	raw := "```\n{\"key\": \"val\"}\n```"
 	extracted := extractJSON(raw)
@@ -353,36 +288,20 @@ func TestExtractJSON_DuplicateOutput(t *testing.T) {
 	}
 }
 
-// TestParseEntityResponse_DuplicateOutput is the end-to-end version of the
-// above: ParseEntityResponse must succeed and return only the first object's
-// entities when the LLM repeats itself.
-func TestParseEntityResponse_DuplicateOutput(t *testing.T) {
-	raw := `{"entities": [{"name": "fb-automate", "type": "tool", "confidence": 1.0}]} {"entities": [{"name": "reply-comment", "type": "project", "confidence": 0.7}]}`
-	entities, err := ParseEntityResponse(raw)
+// TestParseUnifiedResponse_DuplicateOutput ensures the unified parser handles
+// models that repeat their JSON output (e.g. llama3.2 quirk): only the first
+// object's fields appear.
+func TestParseUnifiedResponse_DuplicateOutput(t *testing.T) {
+	raw := `{"summary": "first", "key_points": ["A"]} {"summary": "second", "key_points": ["B"]}`
+	res, err := ParseUnifiedResponse(raw, []string{"summary"})
 	if err != nil {
-		t.Fatalf("ParseEntityResponse failed on duplicate output: %v", err)
+		t.Fatalf("ParseUnifiedResponse: %v", err)
 	}
-	if len(entities) != 1 {
-		t.Fatalf("expected 1 entity from first object, got %d: %+v", len(entities), entities)
+	if res.Summary != "first" {
+		t.Fatalf("expected 'first', got %q", res.Summary)
 	}
-	if entities[0].Name != "fb-automate" {
-		t.Fatalf("expected 'fb-automate', got %q", entities[0].Name)
-	}
-}
-
-// TestParseSummarizeResponse_DuplicateOutput ensures summarization parsing
-// handles the llama3.2 duplicate-output pattern.
-func TestParseSummarizeResponse_DuplicateOutput(t *testing.T) {
-	raw := `{"summary": "first summary", "key_points": ["point A"]} {"summary": "second summary", "key_points": ["point B"]}`
-	summary, keyPoints, err := ParseSummarizeResponse(raw)
-	if err != nil {
-		t.Fatalf("ParseSummarizeResponse failed on duplicate output: %v", err)
-	}
-	if summary != "first summary" {
-		t.Fatalf("expected 'first summary', got %q", summary)
-	}
-	if len(keyPoints) != 1 || keyPoints[0] != "point A" {
-		t.Fatalf("expected ['point A'], got %v", keyPoints)
+	if len(res.KeyPoints) != 1 || res.KeyPoints[0] != "A" {
+		t.Fatalf("expected ['A'], got %v", res.KeyPoints)
 	}
 }
 
@@ -409,20 +328,6 @@ func TestExtractJSON_ArrayBrackets(t *testing.T) {
 	extracted := extractJSON(raw)
 	if !contains(extracted, `[{"a":1}]`) {
 		t.Fatalf("failed to extract array: %q", extracted)
-	}
-}
-
-func TestParseSummary_WithMarkdownFences(t *testing.T) {
-	raw := "```json\n{\"summary\": \"fenced\", \"key_points\": [\"a\"]}\n```"
-	summary, kp, err := ParseSummarizeResponse(raw)
-	if err != nil {
-		t.Fatalf("failed: %v", err)
-	}
-	if summary != "fenced" {
-		t.Fatalf("expected 'fenced', got %q", summary)
-	}
-	if len(kp) != 1 || kp[0] != "a" {
-		t.Fatalf("unexpected key_points: %v", kp)
 	}
 }
 

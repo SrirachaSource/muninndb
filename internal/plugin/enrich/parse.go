@@ -100,140 +100,142 @@ func extractJSON(s string) string {
 	return s[start:]
 }
 
-// ParseEntityResponse parses the JSON response from the entity extraction call.
-func ParseEntityResponse(raw string) ([]plugin.ExtractedEntity, error) {
-	raw = strings.TrimSpace(raw)
-	jsonStr := extractJSON(raw)
-
-	if rawEntities, ok, err := extractTopLevelField(jsonStr, "entities"); err == nil && ok {
-		if isJSONNull(rawEntities) {
-			return nil, nil
-		}
-		var entities []plugin.ExtractedEntity
-		if err := json.Unmarshal(rawEntities, &entities); err != nil {
-			return nil, fmt.Errorf("invalid entity response JSON: %s", truncateForError(jsonStr))
-		}
-		return validateAndDedupeEntities(entities), nil
-	}
-
-	// Try to parse as direct array
-	var entities []plugin.ExtractedEntity
-	if err := json.Unmarshal([]byte(jsonStr), &entities); err == nil {
-		return validateAndDedupeEntities(entities), nil
-	}
-
-	return nil, fmt.Errorf("invalid entity response JSON: %s", truncateForError(jsonStr))
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
-// ParseRelationshipResponse parses the JSON response from the relationship extraction call.
-func ParseRelationshipResponse(raw string) ([]plugin.ExtractedRelation, error) {
+// UnifiedEnrichment holds the parsed output of a single unified enrichment
+// call. Field strings (MemoryType, TypeLabel, Category, Subcategory) carry the
+// raw LLM output; callers are responsible for mapping them to canonical
+// storage types via resolveClassification in pipeline.go.
+type UnifiedEnrichment struct {
+	Entities      []plugin.ExtractedEntity
+	Relationships []plugin.ExtractedRelation
+	MemoryType    string
+	TypeLabel     string
+	Category      string
+	Subcategory   string
+	Tags          []string
+	Summary       string
+	KeyPoints     []string
+}
+
+// ParseUnifiedResponse parses the single-call enrichment response into a
+// UnifiedEnrichment value, populating only the fields for the enabled stages.
+//
+// Fields not listed in `enabled` are left zero-valued even if the LLM
+// returned them. Relationships whose endpoints are not present in the parsed
+// entity set are dropped (defense against the model hallucinating links to
+// entities it failed to extract).
+//
+// Returns an error only if the response is not valid JSON or every enabled
+// stage produced an empty payload. Partial output is preserved: e.g. if
+// entities parses cleanly but classification is missing, the returned
+// UnifiedEnrichment has entities populated and classification fields blank.
+func ParseUnifiedResponse(raw string, enabled []string) (*UnifiedEnrichment, error) {
 	raw = strings.TrimSpace(raw)
 	jsonStr := extractJSON(raw)
 
-	if rawRelationships, ok, err := extractTopLevelField(jsonStr, "relationships"); err == nil && ok {
-		if isJSONNull(rawRelationships) {
-			return nil, nil
+	var wrapper struct {
+		Entities      json.RawMessage `json:"entities"`
+		Relationships json.RawMessage `json:"relationships"`
+		MemoryType    string          `json:"memory_type"`
+		TypeLabel     string          `json:"type_label"`
+		Category      string          `json:"category"`
+		Subcategory   string          `json:"subcategory"`
+		Tags          []string        `json:"tags"`
+		Summary       string          `json:"summary"`
+		KeyPoints     []string        `json:"key_points"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
+		return nil, fmt.Errorf("invalid unified enrichment JSON: %s", truncateForError(jsonStr))
+	}
+
+	result := &UnifiedEnrichment{}
+	want := func(stage string) bool {
+		for _, s := range enabled {
+			if s == stage {
+				return true
+			}
 		}
-		var wrapper []struct {
+		return false
+	}
+
+	if want("entities") && len(wrapper.Entities) > 0 && !isJSONNull(wrapper.Entities) {
+		var ents []plugin.ExtractedEntity
+		if err := json.Unmarshal(wrapper.Entities, &ents); err == nil {
+			result.Entities = validateAndDedupeEntities(ents)
+		}
+	}
+
+	if want("relationships") && len(wrapper.Relationships) > 0 && !isJSONNull(wrapper.Relationships) {
+		var rels []struct {
 			From   string  `json:"from"`
 			To     string  `json:"to"`
 			Type   string  `json:"type"`
 			Weight float32 `json:"weight"`
 		}
-		if err := json.Unmarshal(rawRelationships, &wrapper); err != nil {
-			return nil, fmt.Errorf("invalid relationship response JSON: %s", truncateForError(jsonStr))
+		if err := json.Unmarshal(wrapper.Relationships, &rels); err == nil {
+			parsed := make([]plugin.ExtractedRelation, 0, len(rels))
+			for _, r := range rels {
+				parsed = append(parsed, plugin.ExtractedRelation{
+					FromEntity: r.From,
+					ToEntity:   r.To,
+					RelType:    r.Type,
+					Weight:     r.Weight,
+				})
+			}
+			parsed = validateRelationships(parsed)
+			// Drop hallucinated relationships that don't anchor to a parsed entity.
+			if len(result.Entities) > 0 {
+				known := make(map[string]bool, len(result.Entities))
+				for _, e := range result.Entities {
+					known[e.Name] = true
+				}
+				filtered := parsed[:0]
+				for _, r := range parsed {
+					if known[r.FromEntity] && known[r.ToEntity] {
+						filtered = append(filtered, r)
+					}
+				}
+				parsed = filtered
+			}
+			result.Relationships = parsed
 		}
-		var result []plugin.ExtractedRelation
-		for _, rel := range wrapper {
-			result = append(result, plugin.ExtractedRelation{
-				FromEntity: rel.From,
-				ToEntity:   rel.To,
-				RelType:    rel.Type,
-				Weight:     rel.Weight,
-			})
-		}
-		return validateRelationships(result), nil
 	}
 
-	// Try to parse as direct array
-	var rawRels []struct {
-		From   string  `json:"from"`
-		To     string  `json:"to"`
-		Type   string  `json:"type"`
-		Weight float32 `json:"weight"`
-	}
-	if err := json.Unmarshal([]byte(jsonStr), &rawRels); err == nil {
-		var result []plugin.ExtractedRelation
-		for _, rel := range rawRels {
-			result = append(result, plugin.ExtractedRelation{
-				FromEntity: rel.From,
-				ToEntity:   rel.To,
-				RelType:    rel.Type,
-				Weight:     rel.Weight,
-			})
-		}
-		return validateRelationships(result), nil
+	if want("classification") {
+		result.MemoryType = wrapper.MemoryType
+		result.TypeLabel = wrapper.TypeLabel
+		result.Category = wrapper.Category
+		result.Subcategory = wrapper.Subcategory
+		result.Tags = wrapper.Tags
 	}
 
-	return nil, fmt.Errorf("invalid relationship response JSON: %s", truncateForError(jsonStr))
+	if want("summary") {
+		result.Summary = wrapper.Summary
+		result.KeyPoints = wrapper.KeyPoints
+	}
+
+	if isUnifiedResultEmpty(result) {
+		return nil, fmt.Errorf("unified enrichment response had no usable fields: %s", truncateForError(jsonStr))
+	}
+	return result, nil
 }
 
-func extractTopLevelField(jsonStr, field string) (json.RawMessage, bool, error) {
-	var wrapper map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
-		return nil, false, err
-	}
-	value, ok := wrapper[field]
-	return value, ok, nil
-}
-
-func isJSONNull(raw json.RawMessage) bool {
-	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
-}
-
-// ParseClassificationResponse parses the JSON response from the classification call.
-func ParseClassificationResponse(raw string) (memType, typeLabel, category, subcategory string, tags []string, err error) {
-	raw = strings.TrimSpace(raw)
-	jsonStr := extractJSON(raw)
-
-	var result struct {
-		MemoryType  string   `json:"memory_type"`
-		TypeLabel   string   `json:"type_label"`
-		Category    string   `json:"category"`
-		Subcategory string   `json:"subcategory"`
-		Tags        []string `json:"tags"`
-	}
-
-	err = json.Unmarshal([]byte(jsonStr), &result)
-	if err != nil {
-		return "", "", "", "", nil, fmt.Errorf("invalid classification response JSON: %s", truncateForError(jsonStr))
-	}
-	if result.MemoryType == "" && result.TypeLabel == "" && result.Category == "" && result.Subcategory == "" && len(result.Tags) == 0 {
-		return "", "", "", "", nil, fmt.Errorf("classification response was empty")
-	}
-
-	return result.MemoryType, result.TypeLabel, result.Category, result.Subcategory, result.Tags, nil
-}
-
-// ParseSummarizeResponse parses the JSON response from the summarization call.
-func ParseSummarizeResponse(raw string) (summary string, keyPoints []string, err error) {
-	raw = strings.TrimSpace(raw)
-	jsonStr := extractJSON(raw)
-
-	var result struct {
-		Summary   string   `json:"summary"`
-		KeyPoints []string `json:"key_points"`
-	}
-
-	err = json.Unmarshal([]byte(jsonStr), &result)
-	if err != nil {
-		return "", nil, fmt.Errorf("invalid summarize response JSON: %s", truncateForError(jsonStr))
-	}
-	if result.Summary == "" && len(result.KeyPoints) == 0 {
-		return "", nil, fmt.Errorf("summarize response was empty")
-	}
-
-	return result.Summary, result.KeyPoints, nil
+// isUnifiedResultEmpty returns true when none of the requested fields have any
+// content, so callers can distinguish "model returned nothing" from "model
+// returned partial data".
+func isUnifiedResultEmpty(r *UnifiedEnrichment) bool {
+	return len(r.Entities) == 0 &&
+		len(r.Relationships) == 0 &&
+		r.MemoryType == "" &&
+		r.TypeLabel == "" &&
+		r.Category == "" &&
+		r.Subcategory == "" &&
+		len(r.Tags) == 0 &&
+		r.Summary == "" &&
+		len(r.KeyPoints) == 0
 }
 
 func truncateForError(s string) string {

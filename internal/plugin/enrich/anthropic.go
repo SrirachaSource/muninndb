@@ -13,6 +13,10 @@ import (
 )
 
 // AnthropicLLMProvider is an HTTP client for Anthropic's /v1/messages endpoint.
+// The system prompt is sent as a single cacheable content block so identical
+// system prompts across many calls hit Anthropic's prompt cache (90% input
+// discount on cache hits). The 1h cache TTL is opted into via the
+// extended-cache-ttl-2025-04-11 beta header.
 type AnthropicLLMProvider struct {
 	client  *http.Client
 	baseURL string
@@ -20,12 +24,29 @@ type AnthropicLLMProvider struct {
 	apiKey  string
 }
 
+// anthropicCacheControl marks a content block as cacheable. type is always
+// "ephemeral"; ttl defaults to "5m" when omitted by Anthropic, or "1h" when
+// the extended-cache-ttl-2025-04-11 beta header is on the request.
+type anthropicCacheControl struct {
+	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
+}
+
+// anthropicSystemBlock is a single content block in the system field. We
+// always send the system as a one-element array of these so cache_control
+// can attach.
+type anthropicSystemBlock struct {
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
+
 // anthropicMessagesRequest is the request structure for Anthropic messages API.
 type anthropicMessagesRequest struct {
-	Model       string               `json:"model"`
-	MaxTokens   int                  `json:"max_tokens"`
-	System      string               `json:"system"`
-	Messages    []anthropicMessage   `json:"messages"`
+	Model     string                 `json:"model"`
+	MaxTokens int                    `json:"max_tokens"`
+	System    []anthropicSystemBlock `json:"system"`
+	Messages  []anthropicMessage     `json:"messages"`
 }
 
 // anthropicMessage is a message in the Anthropic messages API.
@@ -67,7 +88,7 @@ func (p *AnthropicLLMProvider) Init(ctx context.Context, cfg LLMProviderConfig) 
 		return fmt.Errorf("anthropic provider requires API key")
 	}
 
-	// Send a probe completion request to validate connectivity
+	// Send a probe completion request to validate connectivity.
 	_, err := p.Complete(ctx, "You are a helpful assistant.", "Say 'OK' only.")
 	if err != nil {
 		return fmt.Errorf("anthropic connectivity check failed: %w", err)
@@ -76,12 +97,20 @@ func (p *AnthropicLLMProvider) Init(ctx context.Context, cfg LLMProviderConfig) 
 	return nil
 }
 
-// Complete sends a messages request to Anthropic.
+// Complete sends a messages request to Anthropic. The system prompt is wrapped
+// in a single cacheable content block (cache_control: ephemeral, ttl=1h) so
+// repeated calls with the same system prompt hit Anthropic's prompt cache.
 func (p *AnthropicLLMProvider) Complete(ctx context.Context, system, user string) (string, error) {
 	req := anthropicMessagesRequest{
 		Model:     p.model,
 		MaxTokens: 1024,
-		System:    system,
+		System: []anthropicSystemBlock{
+			{
+				Type:         "text",
+				Text:         system,
+				CacheControl: &anthropicCacheControl{Type: "ephemeral", TTL: "1h"},
+			},
+		},
 		Messages: []anthropicMessage{
 			{Role: "user", Content: user},
 		},
@@ -105,6 +134,9 @@ func (p *AnthropicLLMProvider) Complete(ctx context.Context, system, user string
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-key", p.apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	// Opt into 1h cache TTL. Without this header, ttl="1h" on the cache
+	// control block is rejected by the API.
+	httpReq.Header.Set("anthropic-beta", "extended-cache-ttl-2025-04-11")
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
@@ -126,7 +158,7 @@ func (p *AnthropicLLMProvider) Complete(ctx context.Context, system, user string
 		return "", fmt.Errorf("anthropic response has no content")
 	}
 
-	// Return the first text block
+	// Return the first text block.
 	for _, block := range messagesResp.Content {
 		if block.Type == "text" {
 			return block.Text, nil

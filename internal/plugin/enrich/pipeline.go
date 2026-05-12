@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/config"
@@ -19,25 +18,23 @@ import (
 // Defined in the plugin package; aliased here for backwards compatibility.
 var ErrNothingToEnrich = plugin.ErrNothingToEnrich
 
-// EnrichmentPipeline orchestrates the LLM calls per engram.
-// In full mode (default) it runs up to 4 calls: entity extraction,
-// relationship extraction, classification, and summarization.
-// In light mode it runs only summarization (1 call).
-// Individual stages can be disabled via per-stage flags in the config.
+// EnrichmentPipeline orchestrates a single unified LLM call per engram. The
+// call asks for entities, relationships, classification, and summary in one
+// JSON response. Stages can be disabled in config (or via light mode = summary
+// only); stages whose output the engram already has inline are skipped and
+// carried forward. If every stage is skipped, no LLM call is made.
 type EnrichmentPipeline struct {
 	provider LLMProvider
-	prompts  *Prompts
 	limiter  *TokenBucketLimiter
 	cfg      *config.PluginConfig
 	stats    llmstats.LLMCallStats
 }
 
 // NewPipeline creates a new enrichment pipeline.
-// cfg may be nil, in which case all stages are enabled in full mode.
+// cfg may be nil, in which case all stages are enabled.
 func NewPipeline(provider LLMProvider, limiter *TokenBucketLimiter) *EnrichmentPipeline {
 	return &EnrichmentPipeline{
 		provider: provider,
-		prompts:  DefaultPrompts(),
 		limiter:  limiter,
 	}
 }
@@ -93,11 +90,38 @@ func (p *EnrichmentPipeline) stageEnabled(stage string) bool {
 	return p.cfg.EnrichStageEnabled(stage)
 }
 
-// Run executes the enrichment pipeline for one engram.
-// The engram's existing fields are checked: if a stage's output is already
-// present (caller-provided via inline enrichment), that stage is skipped.
-// Returns an error if every enabled stage either fails or produces no output.
-// Partial failures are logged per-stage and still return any successful output.
+// stagesToRun returns the canonical-order list of stages that should be
+// requested from the LLM for this engram: those that are config-enabled AND
+// don't already have caller-provided inline data on the engram.
+func (p *EnrichmentPipeline) stagesToRun(eng *storage.Engram) []string {
+	out := make([]string, 0, 4)
+	if p.stageEnabled("entities") && !engramHasEntities(eng) {
+		out = append(out, "entities")
+	}
+	// Relationships depend on entities. If entities are skipped because they
+	// already exist inline, we can't ask the model for relationships in a way
+	// it can ground; in that case skip relationships too. If entities are
+	// being asked for, ask for relationships alongside them.
+	if p.stageEnabled("relationships") && p.stageEnabled("entities") && !engramHasEntities(eng) {
+		out = append(out, "relationships")
+	}
+	if p.stageEnabled("classification") && !engramHasClassification(eng) {
+		out = append(out, "classification")
+	}
+	if p.stageEnabled("summary") && !engramHasSummary(eng) {
+		out = append(out, "summary")
+	}
+	return out
+}
+
+// Run executes the enrichment pipeline for one engram with a single LLM call.
+//
+// Stages skipped due to inline data on the engram are carried forward into the
+// result so the digest is marked correctly downstream.
+//
+// Returns ErrNothingToEnrich (wrapped) if every stage is skipped because the
+// engram already has data. Returns a real error if the LLM call fails or the
+// response is unparseable.
 func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (result *plugin.EnrichmentResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -107,84 +131,103 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 	}()
 
 	result = &plugin.EnrichmentResult{}
-	var stageErrors []string
 
-	// Call 1: Entity extraction
-	var entities []plugin.ExtractedEntity
-	if p.stageEnabled("entities") && !engramHasEntities(eng) {
-		ents, err := p.extractEntities(ctx, eng)
-		if err != nil {
-			slog.Warn("enrich: entity extraction failed", "id", eng.ID.String(), "err", err)
-			stageErrors = append(stageErrors, fmt.Sprintf("entities: %v", err))
-			ents = nil
+	stages := p.stagesToRun(eng)
+	carryForward(eng, result)
+
+	if len(stages) == 0 {
+		// Nothing for the LLM to do. Either every stage was disabled or
+		// every enabled stage already has inline data. If the carry-forward
+		// produced anything, return that; otherwise signal nothing-to-enrich.
+		if isResultEmpty(result) {
+			return nil, fmt.Errorf("engram %s: %w", eng.ID.String(), ErrNothingToEnrich)
 		}
-		entities = ents
-		result.Entities = entities
+		return result, nil
 	}
 
-	// Call 2: Relationship extraction (only if we have entities and stage enabled)
-	if p.stageEnabled("relationships") && len(entities) > 0 {
-		rels, err := p.extractRelationships(ctx, eng, entities)
-		if err != nil {
-			slog.Warn("enrich: relationship extraction failed", "id", eng.ID.String(), "err", err)
-			stageErrors = append(stageErrors, fmt.Sprintf("relationships: %v", err))
-			rels = nil
-		}
-		result.Relationships = rels
+	if err := p.limiter.Wait(ctx); err != nil {
+		return nil, err
 	}
 
-	// Call 3: Classification
-	if p.stageEnabled("classification") && !engramHasClassification(eng) {
-		memType, typeLabel, category, subcategory, tags, err := p.classify(ctx, eng)
-		if err != nil {
-			slog.Warn("enrich: classification failed", "id", eng.ID.String(), "err", err)
-			stageErrors = append(stageErrors, fmt.Sprintf("classification: %v", err))
-		} else {
-			mt, _ := resolveClassification(memType, typeLabel)
-			result.MemoryType = mt.String()
-			result.TypeLabel = typeLabel
-			if category != "" && subcategory != "" {
-				result.Classification = category + "/" + subcategory
-			}
-			_ = tags
+	system := BuildUnifiedPrompt(stages)
+	user := fmt.Sprintf("Concept: %s\n\nContent: %s", eng.Concept, eng.Content)
+
+	start := time.Now()
+	resp, llmErr := p.provider.Complete(ctx, system, user)
+	p.recordComplete(ctx, "unified", time.Since(start).Milliseconds(), llmErr)
+	if llmErr != nil {
+		slog.Warn("enrich: unified call failed", "id", eng.ID.String(), "err", llmErr)
+		// Carry-forward may still have something useful; preserve that on
+		// error rather than wiping it.
+		if !isResultEmpty(result) {
+			return result, nil
 		}
-	} else if engramHasClassification(eng) {
-		// Stage skipped because inline data exists. Carry the engram's existing
-		// classification into the result so PersistEnrichmentResult -> UpdateDigest
-		// sees non-empty values and sets DigestClassified.
+		return nil, fmt.Errorf("enrich: unified call failed for engram %s: %w", eng.ID.String(), llmErr)
+	}
+
+	parsed, parseErr := ParseUnifiedResponse(resp, stages)
+	if parseErr != nil {
+		slog.Warn("enrich: unified response parse failed", "id", eng.ID.String(), "err", parseErr)
+		if !isResultEmpty(result) {
+			return result, nil
+		}
+		return nil, fmt.Errorf("enrich: unified response parse failed for engram %s: %w", eng.ID.String(), parseErr)
+	}
+
+	mergeUnified(parsed, result)
+	return result, nil
+}
+
+// carryForward populates `result` with stage outputs that already live on the
+// engram (caller-provided inline data). PersistEnrichmentResult -> UpdateDigest
+// uses these to set the corresponding Digest* flags.
+func carryForward(eng *storage.Engram, result *plugin.EnrichmentResult) {
+	if engramHasClassification(eng) {
 		result.MemoryType = eng.MemoryType.String()
 		result.TypeLabel = eng.TypeLabel
 	}
-
-	// Call 4: Summarization
-	if p.stageEnabled("summary") && !engramHasSummary(eng) {
-		summary, keyPoints, err := p.summarize(ctx, eng)
-		if err != nil {
-			slog.Warn("enrich: summarization failed", "id", eng.ID.String(), "err", err)
-			stageErrors = append(stageErrors, fmt.Sprintf("summary: %v", err))
-		} else {
-			result.Summary = summary
-			result.KeyPoints = keyPoints
-		}
-	} else if engramHasSummary(eng) {
-		// Stage skipped because inline data exists. Carry the engram's existing
-		// summary into the result so PersistEnrichmentResult -> UpdateDigest
-		// sees non-empty values and sets DigestSummarized.
+	if engramHasSummary(eng) {
 		result.Summary = eng.Summary
 		result.KeyPoints = eng.KeyPoints
 	}
+}
 
-	// If ALL stages produced nothing, return error so retry can be attempted
-	if result.Summary == "" && len(result.KeyPoints) == 0 &&
-		len(result.Entities) == 0 && result.MemoryType == "" &&
-		result.TypeLabel == "" && result.Classification == "" {
-		if len(stageErrors) > 0 {
-			return nil, fmt.Errorf("enrich: all pipeline stages failed for engram %s: %s", eng.ID.String(), strings.Join(stageErrors, "; "))
-		}
-		return nil, fmt.Errorf("engram %s: %w", eng.ID.String(), ErrNothingToEnrich)
+// mergeUnified copies parsed LLM output into result for the fields the model
+// was asked about, mapping classification strings into the canonical storage
+// types. Carry-forward fields already on result are preserved when the model
+// returned nothing for that stage.
+func mergeUnified(parsed *UnifiedEnrichment, result *plugin.EnrichmentResult) {
+	if len(parsed.Entities) > 0 {
+		result.Entities = parsed.Entities
 	}
+	if len(parsed.Relationships) > 0 {
+		result.Relationships = parsed.Relationships
+	}
+	if parsed.MemoryType != "" || parsed.TypeLabel != "" || parsed.Category != "" || parsed.Subcategory != "" {
+		mt, _ := resolveClassification(parsed.MemoryType, parsed.TypeLabel)
+		result.MemoryType = mt.String()
+		result.TypeLabel = parsed.TypeLabel
+		if parsed.Category != "" && parsed.Subcategory != "" {
+			result.Classification = parsed.Category + "/" + parsed.Subcategory
+		}
+	}
+	if parsed.Summary != "" {
+		result.Summary = parsed.Summary
+	}
+	if len(parsed.KeyPoints) > 0 {
+		result.KeyPoints = parsed.KeyPoints
+	}
+}
 
-	return result, nil
+// isResultEmpty reports whether an EnrichmentResult has no usable output at all.
+func isResultEmpty(r *plugin.EnrichmentResult) bool {
+	return r.Summary == "" &&
+		len(r.KeyPoints) == 0 &&
+		len(r.Entities) == 0 &&
+		len(r.Relationships) == 0 &&
+		r.MemoryType == "" &&
+		r.TypeLabel == "" &&
+		r.Classification == ""
 }
 
 // engramHasEntities returns true if the engram already has caller-provided entities,
@@ -240,81 +283,3 @@ func resolveClassification(memType, typeLabel string) (storage.MemoryType, strin
 	return mt, memType
 }
 
-// extractEntities executes Call 1: entity extraction.
-func (p *EnrichmentPipeline) extractEntities(ctx context.Context, eng *storage.Engram) ([]plugin.ExtractedEntity, error) {
-	if err := p.limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
-
-	userMsg := fmt.Sprintf("Concept: %s\n\nContent: %s", eng.Concept, eng.Content)
-	start := time.Now()
-	resp, err := p.provider.Complete(ctx, p.prompts.EntitiesSystem, userMsg)
-	p.recordComplete(ctx, "entities", time.Since(start).Milliseconds(), err)
-	if err != nil {
-		return nil, err
-	}
-
-	return ParseEntityResponse(resp)
-}
-
-// extractRelationships executes Call 2: relationship extraction.
-func (p *EnrichmentPipeline) extractRelationships(ctx context.Context, eng *storage.Engram, entities []plugin.ExtractedEntity) ([]plugin.ExtractedRelation, error) {
-	if err := p.limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
-
-	// Build entities JSON for the prompt
-	entitiesJSON := "["
-	for i, e := range entities {
-		if i > 0 {
-			entitiesJSON += ", "
-		}
-		entitiesJSON += fmt.Sprintf(`{"name": %q, "type": %q, "confidence": %.2f}`, e.Name, e.Type, e.Confidence)
-	}
-	entitiesJSON += "]"
-
-	userMsg := fmt.Sprintf("Entities: %s\n\nConcept: %s\n\nContent: %s",
-		entitiesJSON, eng.Concept, eng.Content)
-	start := time.Now()
-	resp, err := p.provider.Complete(ctx, p.prompts.RelationshipsSystem, userMsg)
-	p.recordComplete(ctx, "relationships", time.Since(start).Milliseconds(), err)
-	if err != nil {
-		return nil, err
-	}
-
-	return ParseRelationshipResponse(resp)
-}
-
-// classify executes Call 3: classification.
-func (p *EnrichmentPipeline) classify(ctx context.Context, eng *storage.Engram) (memType, typeLabel, category, subcategory string, tags []string, err error) {
-	if err := p.limiter.Wait(ctx); err != nil {
-		return "", "", "", "", nil, err
-	}
-
-	userMsg := fmt.Sprintf("Concept: %s\n\nContent: %s", eng.Concept, eng.Content)
-	start := time.Now()
-	resp, err := p.provider.Complete(ctx, p.prompts.ClassifySystem, userMsg)
-	p.recordComplete(ctx, "classification", time.Since(start).Milliseconds(), err)
-	if err != nil {
-		return "", "", "", "", nil, err
-	}
-
-	return ParseClassificationResponse(resp)
-}
-
-// summarize executes Call 4: summarization.
-func (p *EnrichmentPipeline) summarize(ctx context.Context, eng *storage.Engram) (summary string, keyPoints []string, err error) {
-	if err := p.limiter.Wait(ctx); err != nil {
-		return "", nil, err
-	}
-
-	userMsg := fmt.Sprintf("Concept: %s\n\nContent: %s", eng.Concept, eng.Content)
-	start := time.Now()
-	resp, err := p.provider.Complete(ctx, p.prompts.SummarizeSystem, userMsg)
-	p.recordComplete(ctx, "summary", time.Since(start).Milliseconds(), err)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return ParseSummarizeResponse(resp)
-}

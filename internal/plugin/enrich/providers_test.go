@@ -416,13 +416,28 @@ func TestAnthropicProvider_Complete_Success(t *testing.T) {
 		if r.Header.Get("anthropic-version") != "2023-06-01" {
 			t.Errorf("missing anthropic-version header")
 		}
+		if r.Header.Get("anthropic-beta") != "extended-cache-ttl-2025-04-11" {
+			t.Errorf("missing or wrong anthropic-beta header for 1h cache TTL: %q", r.Header.Get("anthropic-beta"))
+		}
 
 		var req anthropicMessagesRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if req.System == "" {
-			t.Error("expected non-empty system prompt")
+		if len(req.System) == 0 {
+			t.Fatal("expected at least one system content block")
+		}
+		if req.System[0].Text == "" {
+			t.Error("expected non-empty system prompt text")
+		}
+		if req.System[0].CacheControl == nil {
+			t.Fatal("expected cache_control on system block")
+		}
+		if req.System[0].CacheControl.Type != "ephemeral" {
+			t.Errorf("expected cache_control.type=ephemeral, got %q", req.System[0].CacheControl.Type)
+		}
+		if req.System[0].CacheControl.TTL != "1h" {
+			t.Errorf("expected cache_control.ttl=1h, got %q", req.System[0].CacheControl.TTL)
 		}
 
 		resp := anthropicMessagesResponse{

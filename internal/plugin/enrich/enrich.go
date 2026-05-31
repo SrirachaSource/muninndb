@@ -218,6 +218,45 @@ func (s *EnrichService) Enrich(ctx context.Context, eng *storage.Engram) (*plugi
 	return result, err
 }
 
+// EnrichBatch enriches many engrams in one Anthropic Message Batch (50% cheaper),
+// for the background retroactive sweep. Per-engram outcomes come back in the
+// results/errs maps (keyed by engram-id string); a non-nil error means the whole
+// batch failed (submit/poll/fetch) — the caller should retry the set. Returns
+// ErrBatchUnsupported when the provider is not batch-capable (caller falls back
+// to per-engram Enrich). The whole batch is gated by the circuit breaker as one
+// operation, so a provider outage trips it the same as the synchronous path.
+func (s *EnrichService) EnrichBatch(
+	ctx context.Context, engs []*storage.Engram,
+) (map[string]*plugin.EnrichmentResult, map[string]error, error) {
+	s.mu.Lock()
+	closed := s.closed
+	pipeline := s.pipeline
+	breaker := s.breaker
+	s.mu.Unlock()
+
+	if closed {
+		return nil, nil, fmt.Errorf("enrich service is closed")
+	}
+	if pipeline == nil {
+		return nil, nil, fmt.Errorf("enrich service not initialized")
+	}
+
+	if breaker == nil {
+		return pipeline.EnrichBatch(ctx, engs)
+	}
+
+	var (
+		results map[string]*plugin.EnrichmentResult
+		errs    map[string]error
+	)
+	err := breaker.Do(func() error {
+		var runErr error
+		results, errs, runErr = pipeline.EnrichBatch(ctx, engs)
+		return runErr
+	})
+	return results, errs, err
+}
+
 // LLMStats returns a point-in-time snapshot of LLM call metrics.
 func (s *EnrichService) LLMStats() llmstats.Snapshot {
 	s.mu.Lock()

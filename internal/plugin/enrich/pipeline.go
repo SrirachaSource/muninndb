@@ -178,6 +178,157 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 	return result, nil
 }
 
+// batchPlan is the per-engram plan carried across an EnrichBatch call: the
+// stages that drove its prompt and the partially-built result (carry-forward).
+type batchPlan struct {
+	stages []string
+	result *plugin.EnrichmentResult
+}
+
+// EnrichBatch enriches many engrams in ONE Anthropic Message Batch (50% cheaper
+// on input + output). Used by the background retroactive sweep, where minutes of
+// latency are fine. It is synchronous to the caller: it submits one batch and
+// polls to completion before returning. Per-engram outcomes are returned in two
+// maps keyed by engram-id string: successful results, and errors (parse failures,
+// per-request batch failures, nothing-to-enrich). A non-nil error return means
+// the WHOLE batch failed (submit/poll/fetch) and the caller should retry the set.
+//
+// Returns ErrBatchUnsupported if the provider is not batch-capable — the caller
+// must fall back to the synchronous Enrich() path.
+func (p *EnrichmentPipeline) EnrichBatch(
+	ctx context.Context, engs []*storage.Engram,
+) (results map[string]*plugin.EnrichmentResult, errs map[string]error, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("enrich batch panic: %v", r)
+			slog.Error("enrich: batch panic recovered", "panic", r)
+		}
+	}()
+
+	bp, ok := p.provider.(BatchLLMProvider)
+	if !ok {
+		return nil, nil, ErrBatchUnsupported
+	}
+
+	results = make(map[string]*plugin.EnrichmentResult, len(engs))
+	errs = make(map[string]error, len(engs))
+
+	// Plan each engram exactly like Run: stage selection + carry-forward. Only
+	// engrams with stages to run become batch items; the rest resolve inline.
+	plans := make(map[string]*batchPlan, len(engs))
+	items := make([]BatchItem, 0, len(engs))
+	for _, eng := range engs {
+		id := eng.ID.String()
+		res := &plugin.EnrichmentResult{}
+		stages := p.stagesToRun(eng)
+		carryForward(eng, res)
+		if len(stages) == 0 {
+			if isResultEmpty(res) {
+				errs[id] = fmt.Errorf("engram %s: %w", id, ErrNothingToEnrich)
+			} else {
+				results[id] = res
+			}
+			continue
+		}
+		plans[id] = &batchPlan{stages: stages, result: res}
+		items = append(items, BatchItem{
+			CustomID: id,
+			System:   BuildUnifiedPrompt(stages),
+			User:     fmt.Sprintf("Concept: %s\n\nContent: %s", eng.Concept, eng.Content),
+		})
+	}
+
+	if len(items) == 0 {
+		return results, errs, nil
+	}
+
+	// One HTTP submit for the whole batch — gate it through the limiter once.
+	if werr := p.limiter.Wait(ctx); werr != nil {
+		return results, errs, werr
+	}
+
+	start := time.Now()
+	batchID, serr := bp.SubmitBatch(ctx, items)
+	if serr != nil {
+		return results, errs, fmt.Errorf("submit batch: %w", serr)
+	}
+	slog.Info("enrich: batch submitted", "batch_id", batchID, "requests", len(items))
+
+	resultsURL, perr := pollBatchToCompletion(ctx, bp, batchID)
+	if perr != nil {
+		return results, errs, perr
+	}
+
+	fetched, ferr := bp.FetchBatchResults(ctx, resultsURL)
+	if ferr != nil {
+		return results, errs, fmt.Errorf("fetch batch results: %w", ferr)
+	}
+	slog.Info("enrich: batch complete",
+		"batch_id", batchID, "elapsed_ms", time.Since(start).Milliseconds(),
+		"requests", len(items), "fetched", len(fetched))
+
+	// Map each result back and finish it the same way Run does (parse + merge).
+	for id, plan := range plans {
+		br, present := fetched[id]
+		if !present {
+			errs[id] = fmt.Errorf("engram %s: missing from batch results", id)
+			continue
+		}
+		if br.Err != "" {
+			if !isResultEmpty(plan.result) {
+				results[id] = plan.result // carry-forward salvage
+			} else {
+				errs[id] = fmt.Errorf("engram %s: batch request %s", id, br.Err)
+			}
+			continue
+		}
+		parsed, parseErr := ParseUnifiedResponse(br.Text, plan.stages)
+		if parseErr != nil {
+			if !isResultEmpty(plan.result) {
+				results[id] = plan.result
+			} else {
+				errs[id] = fmt.Errorf("enrich: batch parse failed for engram %s: %w", id, parseErr)
+			}
+			continue
+		}
+		mergeUnified(parsed, plan.result)
+		results[id] = plan.result
+	}
+
+	return results, errs, nil
+}
+
+// pollBatchToCompletion polls a submitted batch until it ends, returning the
+// results URL. Caps total wait so a stuck batch cannot block a sweep forever;
+// on timeout the caller leaves the engrams un-flagged and they retry next sweep.
+func pollBatchToCompletion(ctx context.Context, bp BatchLLMProvider, batchID string) (string, error) {
+	const (
+		pollInterval = 10 * time.Second
+		maxWait      = 30 * time.Minute
+	)
+	deadline := time.Now().Add(maxWait)
+	for {
+		st, err := bp.PollBatch(ctx, batchID)
+		if err != nil {
+			return "", fmt.Errorf("poll batch %s: %w", batchID, err)
+		}
+		if st.Ended {
+			if st.ResultsURL == "" {
+				return "", fmt.Errorf("batch %s ended without results_url", batchID)
+			}
+			return st.ResultsURL, nil
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("batch %s did not complete within %s", batchID, maxWait)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
 // carryForward populates `result` with stage outputs that already live on the
 // engram (caller-provided inline data). PersistEnrichmentResult -> UpdateDigest
 // uses these to set the corresponding Digest* flags.

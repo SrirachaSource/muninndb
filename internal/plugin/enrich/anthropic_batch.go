@@ -5,10 +5,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 )
+
+// ErrBatchUnsupported is returned by EnrichBatch when the active LLM provider
+// does not implement BatchLLMProvider (e.g. Ollama / OpenAI / Google here). The
+// caller falls back to the synchronous per-engram path.
+var ErrBatchUnsupported = errors.New("enrich: provider does not support the batch API")
 
 // Message Batches API support for Anthropic enrichment.
 //

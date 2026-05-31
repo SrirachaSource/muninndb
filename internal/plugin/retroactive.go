@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -12,6 +13,23 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/engine/circuit"
 )
+
+// enrichBatchSize is how many engrams the retroactive sweep groups into one
+// Anthropic Message Batch when batch mode is enabled.
+const enrichBatchSize = 100
+
+// enrichBatchEnvVar gates batch enrichment. Set MUNINN_ENRICH_BATCH=1 (e.g. via
+// a Fly secret) to route the background sweep through the 50%-cheaper Message
+// Batches API. Unset/anything-else keeps the synchronous per-engram path. The
+// gate ships dark so deploying the code is zero-risk until it is flipped on.
+const enrichBatchEnvVar = "MUNINN_ENRICH_BATCH"
+
+// batchOutcome is one engram's pre-computed enrichment result (or error) from a
+// submitted Message Batch, consumed by enrichOrBatch during the flush.
+type batchOutcome struct {
+	result *EnrichmentResult
+	err    error
+}
 
 // errLLMFailed is an unexported sentinel wrapping errors that originate from
 // the LLM call itself (bad output, nil result, parse error). It signals a
@@ -52,6 +70,14 @@ type RetroactiveProcessor struct {
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
 	notifyCh chan struct{} // buffered(1); non-blocking send from Notify()
+
+	// Batch-enrichment state, set per-pass in Run() when MUNINN_ENRICH_BATCH=1
+	// and the plugin supports it. enrichBatch nil => synchronous per-engram path.
+	// batchCache holds one flush's pre-computed outcomes; processEnrichEngram
+	// pulls from it via enrichOrBatch instead of making a live LLM call. Both are
+	// touched only from Run's single goroutine, so no extra locking is needed.
+	enrichBatch BatchEnrichPlugin
+	batchCache  map[string]batchOutcome
 }
 
 // NewRetroactiveProcessor creates a new processor for a plugin.
@@ -286,6 +312,58 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 	microEngrams := make([]*Engram, 0, microBatchSize)
 	microTexts := make([]string, 0, microBatchSize)
 
+	// Enrich batch mode: route the background enrich sweep through the
+	// 50%-cheaper Message Batches API when MUNINN_ENRICH_BATCH=1 and the provider
+	// supports it. Off (nil) keeps the synchronous per-engram path. Ships dark.
+	rp.enrichBatch = nil
+	rp.batchCache = nil
+	enrichBuf := make([]*Engram, 0, enrichBatchSize)
+	if os.Getenv(enrichBatchEnvVar) == "1" {
+		if bep, ok := rp.plugin.(BatchEnrichPlugin); ok {
+			rp.enrichBatch = bep
+			rp.batchCache = make(map[string]batchOutcome, enrichBatchSize)
+			slog.Info("retroactive processor: enrich batch mode ENABLED",
+				"plugin", rp.plugin.Name(), "batch_size", enrichBatchSize)
+		}
+	}
+
+	// flushEnrichBatch submits the accumulated engrams as one Message Batch,
+	// then runs each through the normal processEnrichEngram path (which pulls the
+	// pre-computed result from batchCache via enrichOrBatch) so flag/guard/persist
+	// behaviour is identical to the synchronous path.
+	flushEnrichBatch := func() {
+		if rp.enrichBatch == nil || len(enrichBuf) == 0 {
+			return
+		}
+		results, errs, batchErr := rp.enrichBatch.EnrichBatch(ctx, enrichBuf)
+		if batchErr != nil {
+			// Whole-batch failure (submit/poll/fetch) is transient — leave the
+			// engrams unflagged so they retry next sweep. Count for visibility.
+			slog.Warn("retroactive processor: enrich batch failed",
+				"plugin", rp.plugin.Name(), "batch_size", len(enrichBuf), "error", batchErr)
+			rp.statsMu.Lock()
+			rp.stats.Errors += int64(len(enrichBuf))
+			rp.statsMu.Unlock()
+			enrichBuf = enrichBuf[:0]
+			return
+		}
+		for _, eng := range enrichBuf {
+			id := eng.ID.String()
+			switch {
+			case results[id] != nil:
+				rp.batchCache[id] = batchOutcome{result: results[id]}
+			case errs[id] != nil:
+				rp.batchCache[id] = batchOutcome{err: errs[id]}
+			default:
+				rp.batchCache[id] = batchOutcome{err: fmt.Errorf("engram %s: missing from batch results", id)}
+			}
+			procErr := rp.processEnrichEngram(ctx, eng)
+			rp.handleEnrichOutcome(ctx, eng, procErr)
+		}
+		clear(rp.batchCache)
+		enrichBuf = enrichBuf[:0]
+	}
+
 	flushMicroBatch := func() {
 		if !isEmbedPlugin || len(microEngrams) == 0 {
 			return
@@ -385,6 +463,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 		select {
 		case <-ctx.Done():
 			flushMicroBatch()
+			flushEnrichBatch()
 			slog.Info("retroactive processor: cancelled mid-batch", "plugin", rp.plugin.Name())
 			return true
 		default:
@@ -393,6 +472,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 		// Cap per-pass work to bound iterator lifetime during bulk imports.
 		if batchCount >= maxBatchSize {
 			flushMicroBatch()
+			flushEnrichBatch()
 			rp.Notify()
 			break
 		}
@@ -416,62 +496,27 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 			continue
 		}
 
-		// Non-embed (enrich) path: one-at-a-time as before.
-		if err := rp.processEnrichEngram(ctx, eng); err != nil {
-			if errors.Is(err, ErrNothingToEnrich) {
-				// Nothing to enrich is not a failure — mark the engram as
-				// enrichment-complete so it is not retried on the next scan.
-				slog.Debug("retroactive processor: nothing to enrich, marking complete",
-					"plugin", rp.plugin.Name(),
-					"engram_id", eng.ID.String())
-				if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, rp.flagBit); flagErr != nil {
-					slog.Warn("retroactive processor: failed to set digest flag after nothing-to-enrich",
-						"plugin", rp.plugin.Name(),
-						"engram_id", eng.ID.String(),
-						"error", flagErr)
-				}
-				rp.statsMu.Lock()
-				rp.stats.Processed++
-				rp.statsMu.Unlock()
-				batchCount++
-				continue
+		// Non-embed (enrich) path. In batch mode, accumulate and flush in groups
+		// (one Message Batch = 50% cheaper); otherwise process one at a time. Both
+		// finish each engram via the shared handleEnrichOutcome.
+		if rp.enrichBatch != nil {
+			enrichBuf = append(enrichBuf, eng)
+			batchCount++
+			if len(enrichBuf) >= enrichBatchSize {
+				flushEnrichBatch()
 			}
-			slog.Warn("retroactive processor: failed to process engram",
-				"plugin", rp.plugin.Name(),
-				"engram_id", eng.ID.String(),
-				"error", err)
-			rp.statsMu.Lock()
-			rp.stats.Errors++
-			rp.statsMu.Unlock()
-			// LLM-originated failures (bad output, parse error) are permanent for
-			// this engram. Mark DigestEnrichFailed so the processor does not retry
-			// it indefinitely, which would trip the circuit breaker and block
-			// enrichment for all other memories. Storage/persistence errors are NOT
-			// marked — they are transient and should be retried when storage recovers.
-			if errors.Is(err, errLLMFailed) {
-				if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, DigestEnrichFailed); flagErr != nil {
-					slog.Warn("retroactive processor: failed to set DigestEnrichFailed",
-						"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", flagErr)
-				}
+			if batchCount%100 == 0 {
+				runtime.Gosched()
 			}
 			continue
 		}
 
-		if err := rp.store.SetDigestFlag(ctx, eng.ID, rp.flagBit); err != nil {
-			slog.Warn("retroactive processor: failed to set digest flag",
-				"plugin", rp.plugin.Name(),
-				"engram_id", eng.ID.String(),
-				"error", err)
-			rp.statsMu.Lock()
-			rp.stats.Errors++
-			rp.statsMu.Unlock()
-			continue
-		}
+		procErr := rp.processEnrichEngram(ctx, eng)
+		rp.handleEnrichOutcome(ctx, eng, procErr)
 
-		rp.statsMu.Lock()
-		rp.stats.Processed++
+		rp.statsMu.RLock()
 		processed := rp.stats.Processed
-		rp.statsMu.Unlock()
+		rp.statsMu.RUnlock()
 
 		batchCount++
 
@@ -502,8 +547,9 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 		}
 	}
 
-	// Flush any remaining micro-batch at end of iterator.
+	// Flush any remaining micro-batch / enrich-batch at end of iterator.
 	flushMicroBatch()
+	flushEnrichBatch()
 
 	rp.statsMu.Lock()
 	rp.stats.Status = "idle"
@@ -572,9 +618,16 @@ func (rp *RetroactiveProcessor) processEnrichEngram(ctx context.Context, eng *En
 			return nil
 		}
 
-		// Call Enrich for missing fields.
-		result, err := enrich.Enrich(ctx, eng)
+		// Get the enrichment result for the missing fields — from the pre-computed
+		// Message Batch (batch mode) or a live synchronous call.
+		result, err := rp.enrichOrBatch(ctx, enrich, eng)
 		if err != nil {
+			// Nothing-to-enrich is a SKIP, not a failure: the pipeline found every
+			// requested stage already satisfied. Return it unwrapped so the caller
+			// marks the engram complete (flagBit), never DigestEnrichFailed.
+			if errors.Is(err, ErrNothingToEnrich) {
+				return err
+			}
 			// Transient: circuit open, context cancelled/deadline exceeded.
 			// Do not wrap — the caller must not mark the engram as permanently failed.
 			if errors.Is(err, circuit.ErrOpen) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -613,4 +666,70 @@ func (rp *RetroactiveProcessor) processEnrichEngram(ctx context.Context, eng *En
 	}
 
 	return nil
+}
+
+// enrichOrBatch returns the enrichment for one engram. In batch mode the result
+// was pre-computed by a Message Batch and cached by flushEnrichBatch, so this
+// consumes the cached outcome instead of making a live call; otherwise it falls
+// back to the synchronous per-engram Enrich. This keeps processEnrichEngram's
+// flag/guard/persist logic identical on both paths.
+func (rp *RetroactiveProcessor) enrichOrBatch(
+	ctx context.Context, enrich EnrichPlugin, eng *Engram,
+) (*EnrichmentResult, error) {
+	if rp.batchCache != nil {
+		if oc, ok := rp.batchCache[eng.ID.String()]; ok {
+			delete(rp.batchCache, eng.ID.String())
+			return oc.result, oc.err
+		}
+	}
+	return enrich.Enrich(ctx, eng)
+}
+
+// handleEnrichOutcome applies the result of one engram's enrichment attempt:
+// sets the right digest flag and updates stats. procErr is processEnrichEngram's
+// return (nil = success). Shared by the per-engram streaming path and the batch
+// flush so both behave identically. Returns true if the engram was processed
+// (success or nothing-to-enrich), false on error.
+func (rp *RetroactiveProcessor) handleEnrichOutcome(ctx context.Context, eng *Engram, procErr error) bool {
+	if procErr != nil {
+		if errors.Is(procErr, ErrNothingToEnrich) {
+			// Nothing to enrich is not a failure — mark complete so it is not retried.
+			if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, rp.flagBit); flagErr != nil {
+				slog.Warn("retroactive processor: failed to set digest flag after nothing-to-enrich",
+					"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", flagErr)
+			}
+			rp.statsMu.Lock()
+			rp.stats.Processed++
+			rp.statsMu.Unlock()
+			return true
+		}
+		slog.Warn("retroactive processor: failed to process engram",
+			"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", procErr)
+		rp.statsMu.Lock()
+		rp.stats.Errors++
+		rp.statsMu.Unlock()
+		// LLM-originated failures are permanent for this engram. Mark
+		// DigestEnrichFailed so the processor does not retry it indefinitely.
+		// Storage/persistence errors are transient and are NOT marked.
+		if errors.Is(procErr, errLLMFailed) {
+			if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, DigestEnrichFailed); flagErr != nil {
+				slog.Warn("retroactive processor: failed to set DigestEnrichFailed",
+					"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", flagErr)
+			}
+		}
+		return false
+	}
+
+	if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, rp.flagBit); flagErr != nil {
+		slog.Warn("retroactive processor: failed to set digest flag",
+			"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", flagErr)
+		rp.statsMu.Lock()
+		rp.stats.Errors++
+		rp.statsMu.Unlock()
+		return false
+	}
+	rp.statsMu.Lock()
+	rp.stats.Processed++
+	rp.statsMu.Unlock()
+	return true
 }

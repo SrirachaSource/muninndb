@@ -56,6 +56,10 @@ type EnrichService struct {
 	breaker *circuit.Breaker
 }
 
+// EnrichService satisfies the batch-capable enrich interface (used by the
+// retroactive sweep when the provider + config opt into batching).
+var _ plugin.BatchEnrichPlugin = (*EnrichService)(nil)
+
 // NewEnrichService creates an EnrichService from a provider URL.
 func NewEnrichService(providerURL string) (*EnrichService, error) {
 	provCfg, err := plugin.ParseProviderURL(providerURL)

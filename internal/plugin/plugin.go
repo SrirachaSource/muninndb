@@ -61,3 +61,18 @@ type EnrichPlugin interface {
 	// Called asynchronously after write ACK. Never blocks the write path.
 	Enrich(ctx context.Context, eng *Engram) (*EnrichmentResult, error)
 }
+
+// BatchEnrichPlugin is an EnrichPlugin whose provider can enrich many engrams in
+// ONE provider batch (Anthropic Message Batches API = 50% cheaper). The
+// retroactive sweep uses this when the active provider supports it AND batch mode
+// is enabled, and otherwise falls back to per-engram Enrich.
+//
+// Outcomes are returned in two maps keyed by engram-id string: successful
+// results, and per-engram errors (parse failures, per-request batch failures,
+// nothing-to-enrich). A non-nil error return means the WHOLE batch failed
+// (submit/poll/fetch) and the caller should retry the set next sweep.
+type BatchEnrichPlugin interface {
+	EnrichPlugin
+
+	EnrichBatch(ctx context.Context, engs []*Engram) (map[string]*EnrichmentResult, map[string]error, error)
+}

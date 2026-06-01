@@ -27,8 +27,26 @@ type LLMProviderConfig struct {
 	BaseURL     string  // "http://localhost:11434" or "https://api.openai.com"
 	Model       string  // "llama3.2" or "gpt-4o-mini" or "claude-haiku"
 	APIKey      string  // empty for Ollama, required for cloud providers
-	MaxTokens   int     // max response tokens (default: 1024)
+	MaxTokens   int     // max response tokens (0 → defaultEnrichMaxTokens)
 	Temperature float32 // 0.0 for deterministic extraction (default: 0.0)
+}
+
+// defaultEnrichMaxTokens caps each provider's enrichment response. It must be
+// large enough that entity-rich outputs (many entities, and the content-type
+// hint added in PR2) are not silently truncated mid-JSON — the truncation bug
+// this constant replaces. Each provider falls back to it when its resolved
+// MaxTokens is <= 0; the value is threaded in via LLMProviderConfig.MaxTokens,
+// which EnrichService.Init sets.
+const defaultEnrichMaxTokens = 2048
+
+// resolveMaxTokens returns the response-token cap a provider should use, falling
+// back to defaultEnrichMaxTokens when the resolved config leaves it unset (<= 0).
+// This is the single source of truth for the fallback across all providers.
+func resolveMaxTokens(cfg LLMProviderConfig) int {
+	if cfg.MaxTokens > 0 {
+		return cfg.MaxTokens
+	}
+	return defaultEnrichMaxTokens
 }
 
 // defaultBreaker thresholds: 5 consecutive failures open the circuit;
@@ -114,7 +132,7 @@ func (s *EnrichService) Init(ctx context.Context, cfg plugin.PluginConfig) error
 		BaseURL:     s.provCfg.BaseURL,
 		Model:       s.provCfg.Model,
 		APIKey:      cfg.APIKey,
-		MaxTokens:   1024,
+		MaxTokens:   defaultEnrichMaxTokens,
 		Temperature: 0.0,
 	}
 

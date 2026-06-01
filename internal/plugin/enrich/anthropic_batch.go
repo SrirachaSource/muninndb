@@ -124,7 +124,7 @@ func (p *AnthropicLLMProvider) SubmitBatch(ctx context.Context, items []BatchIte
 			CustomID: it.CustomID,
 			Params: anthropicMessagesRequest{
 				Model:     p.model,
-				MaxTokens: 1024,
+				MaxTokens: p.maxTokens,
 				System: []anthropicSystemBlock{
 					{
 						Type:         "text",

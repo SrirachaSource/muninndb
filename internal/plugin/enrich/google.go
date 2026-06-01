@@ -18,6 +18,11 @@ type GoogleLLMProvider struct {
 	baseURL string
 	model   string
 	apiKey  string
+
+	// maxTokens caps the response tokens on every request (maxOutputTokens).
+	// Set from config in Init; defaulted in the constructor so a direct
+	// Complete without Init never serialises maxOutputTokens: 0.
+	maxTokens int
 }
 
 // googleGenerateRequest is the request structure for Gemini generateContent.
@@ -62,6 +67,7 @@ func NewGoogleLLMProvider() *GoogleLLMProvider {
 			Timeout:   300 * time.Second,
 			Transport: plugin.WrapTransport(nil),
 		},
+		maxTokens: defaultEnrichMaxTokens,
 	}
 }
 
@@ -75,6 +81,7 @@ func (p *GoogleLLMProvider) Init(ctx context.Context, cfg LLMProviderConfig) err
 	p.baseURL = cfg.BaseURL
 	p.model = cfg.Model
 	p.apiKey = cfg.APIKey
+	p.maxTokens = resolveMaxTokens(cfg)
 
 	if p.apiKey == "" {
 		return fmt.Errorf("google provider requires API key")
@@ -103,7 +110,7 @@ func (p *GoogleLLMProvider) Complete(ctx context.Context, system, user string) (
 		},
 		GenerationConfig: googleGenerationConfig{
 			Temperature:      0.0,
-			MaxOutputTokens:  1024,
+			MaxOutputTokens:  p.maxTokens,
 			ResponseMimeType: "application/json",
 		},
 	}

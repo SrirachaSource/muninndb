@@ -19,6 +19,11 @@ type OpenAILLMProvider struct {
 	baseURL string
 	model   string
 	apiKey  string
+
+	// maxTokens caps the response tokens on every request. Set from config in
+	// Init; defaulted in the constructor so a direct Complete without Init
+	// never serialises max_tokens: 0.
+	maxTokens int
 }
 
 // openaiChatRequest is the request structure for OpenAI chat API.
@@ -56,6 +61,7 @@ func NewOpenAILLMProvider() *OpenAILLMProvider {
 			Timeout:   300 * time.Second,
 			Transport: plugin.WrapTransport(nil),
 		},
+		maxTokens: defaultEnrichMaxTokens,
 	}
 }
 
@@ -69,6 +75,7 @@ func (p *OpenAILLMProvider) Init(ctx context.Context, cfg LLMProviderConfig) err
 	p.baseURL = cfg.BaseURL
 	p.model = cfg.Model
 	p.apiKey = cfg.APIKey
+	p.maxTokens = resolveMaxTokens(cfg)
 
 	if p.apiKey == "" {
 		return fmt.Errorf("openai provider requires API key")
@@ -91,7 +98,7 @@ func (p *OpenAILLMProvider) Complete(ctx context.Context, system, user string) (
 	req := openaiChatRequest{
 		Model:       p.model,
 		Temperature: 0.0,
-		MaxTokens:   1024,
+		MaxTokens:   p.maxTokens,
 		Messages: []openaiMessage{
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},

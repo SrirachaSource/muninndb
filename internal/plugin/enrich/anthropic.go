@@ -22,6 +22,12 @@ type AnthropicLLMProvider struct {
 	baseURL string
 	model   string
 	apiKey  string
+
+	// maxTokens caps the response tokens on every request. The sync Complete
+	// path and the SubmitBatch path share this one field (same struct). Set
+	// from config in Init; defaulted in the constructor so a direct Complete
+	// without Init never serialises max_tokens: 0.
+	maxTokens int
 }
 
 // anthropicCacheControl marks a content block as cacheable. type is always
@@ -70,6 +76,7 @@ func NewAnthropicLLMProvider() *AnthropicLLMProvider {
 			Timeout:   300 * time.Second,
 			Transport: plugin.WrapTransport(nil),
 		},
+		maxTokens: defaultEnrichMaxTokens,
 	}
 }
 
@@ -83,6 +90,7 @@ func (p *AnthropicLLMProvider) Init(ctx context.Context, cfg LLMProviderConfig) 
 	p.baseURL = cfg.BaseURL
 	p.model = cfg.Model
 	p.apiKey = cfg.APIKey
+	p.maxTokens = resolveMaxTokens(cfg)
 
 	if p.apiKey == "" {
 		return fmt.Errorf("anthropic provider requires API key")
@@ -103,7 +111,7 @@ func (p *AnthropicLLMProvider) Init(ctx context.Context, cfg LLMProviderConfig) 
 func (p *AnthropicLLMProvider) Complete(ctx context.Context, system, user string) (string, error) {
 	req := anthropicMessagesRequest{
 		Model:     p.model,
-		MaxTokens: 1024,
+		MaxTokens: p.maxTokens,
 		System: []anthropicSystemBlock{
 			{
 				Type:         "text",

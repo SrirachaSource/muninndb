@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/config"
@@ -114,6 +115,24 @@ func (p *EnrichmentPipeline) stagesToRun(eng *storage.Engram) []string {
 	return out
 }
 
+// buildUserContent assembles the per-engram USER message for one enrichment
+// call. When the content looks like JSON or code, a content-type hint is
+// prepended (see content_type.go) so the model treats structure AS structure.
+// The hint rides the per-engram user message ONLY -- the system prompt stays
+// byte-stable, so the Anthropic prompt cache (90% input discount) is preserved.
+// Plain prose yields an empty hint, leaving the message byte-identical to the
+// legacy format. This is the single chokepoint for both the sync Run and the
+// batch EnrichBatch paths (previously duplicated inline).
+func buildUserContent(eng *storage.Engram) string {
+	var b strings.Builder
+	if hint := contentHint(DetectContentType(eng.Content)); hint != "" {
+		b.WriteString(hint)
+		b.WriteString("\n\n")
+	}
+	fmt.Fprintf(&b, "Concept: %s\n\nContent: %s", eng.Concept, eng.Content)
+	return b.String()
+}
+
 // Run executes the enrichment pipeline for one engram with a single LLM call.
 //
 // Stages skipped due to inline data on the engram are carried forward into the
@@ -150,7 +169,7 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 	}
 
 	system := BuildUnifiedPrompt(stages)
-	user := fmt.Sprintf("Concept: %s\n\nContent: %s", eng.Concept, eng.Content)
+	user := buildUserContent(eng)
 
 	start := time.Now()
 	resp, llmErr := p.provider.Complete(ctx, system, user)
@@ -234,7 +253,7 @@ func (p *EnrichmentPipeline) EnrichBatch(
 		items = append(items, BatchItem{
 			CustomID: id,
 			System:   BuildUnifiedPrompt(stages),
-			User:     fmt.Sprintf("Concept: %s\n\nContent: %s", eng.Concept, eng.Content),
+			User:     buildUserContent(eng),
 		})
 	}
 

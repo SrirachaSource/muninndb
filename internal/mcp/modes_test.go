@@ -39,8 +39,8 @@ func TestLookupMode_SemanticPreset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookupMode(semantic): %v", err)
 	}
-	if m.Threshold != 0.3 {
-		t.Errorf("semantic Threshold = %v, want 0.3", m.Threshold)
+	if m.Threshold != 0.1 {
+		t.Errorf("semantic Threshold = %v, want 0.1", m.Threshold)
 	}
 	if m.SemanticSimilarity != 0.8 {
 		t.Errorf("semantic SemanticSimilarity = %v, want 0.8", m.SemanticSimilarity)
@@ -64,8 +64,8 @@ func TestLookupMode_RecentPreset(t *testing.T) {
 	if m.MaxHops != 1 {
 		t.Errorf("recent MaxHops = %d, want 1", m.MaxHops)
 	}
-	if m.Threshold != 0.2 {
-		t.Errorf("recent Threshold = %v, want 0.2", m.Threshold)
+	if m.Threshold != 0.1 {
+		t.Errorf("recent Threshold = %v, want 0.1", m.Threshold)
 	}
 }
 

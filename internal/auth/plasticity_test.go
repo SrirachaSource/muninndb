@@ -437,8 +437,8 @@ func TestLookupRecallMode_SemanticValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupRecallMode(semantic): %v", err)
 	}
-	if p.Threshold != 0.3 {
-		t.Errorf("semantic Threshold = %v, want 0.3", p.Threshold)
+	if p.Threshold != 0.1 {
+		t.Errorf("semantic Threshold = %v, want 0.1", p.Threshold)
 	}
 	if p.SemanticSimilarity != 0.8 {
 		t.Errorf("semantic SemanticSimilarity = %v, want 0.8", p.SemanticSimilarity)

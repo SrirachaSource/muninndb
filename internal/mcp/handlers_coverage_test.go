@@ -413,7 +413,8 @@ func (e *modePresetThresholdCapturingEngine) Activate(_ context.Context, req *mb
 }
 
 func TestHandleRecall_ModePresetAppliedWhenNoExplicitThreshold(t *testing.T) {
-	// The "semantic" mode preset has Threshold=0.3. Without an explicit threshold
+	// The "semantic" mode preset has Threshold=0.1 (lowered from 0.3, which
+	// over-filtered the candidate set to zero). Without an explicit threshold
 	// param, the preset value must be used.
 	eng := &modePresetThresholdCapturingEngine{}
 	srv := newTestServerWith(eng)
@@ -423,13 +424,13 @@ func TestHandleRecall_ModePresetAppliedWhenNoExplicitThreshold(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	if eng.lastThreshold != 0.3 {
-		t.Errorf("mode preset threshold = %v, want 0.3", eng.lastThreshold)
+	if eng.lastThreshold != 0.1 {
+		t.Errorf("mode preset threshold = %v, want 0.1", eng.lastThreshold)
 	}
 }
 
 func TestHandleRecall_ExplicitThresholdWinsOverModePreset(t *testing.T) {
-	// An explicit threshold=0.7 must override the semantic preset (0.3).
+	// An explicit threshold=0.7 must override the semantic preset (0.1).
 	eng := &modePresetThresholdCapturingEngine{}
 	srv := newTestServerWith(eng)
 	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["test"],"mode":"semantic","threshold":0.7}}}`

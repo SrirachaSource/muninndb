@@ -275,7 +275,12 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		return
 	}
 
-	threshold := float32(0.5)
+	// Default recall threshold. This is the candidate-retrieval SIMILARITY floor
+	// (0-1 cosine scale), NOT the final ACT-R activation score. Real cosine sims
+	// cluster ~0.1-0.4, so a high floor (the old 0.5) silently filtered the whole
+	// candidate set out before scoring -> zero results for balanced/default recall.
+	// 0.1 matches the engine default and deep mode, which retrieve correctly.
+	threshold := float32(0.1)
 	if t, ok := args["threshold"].(float64); ok {
 		if t < 0 {
 			t = 0

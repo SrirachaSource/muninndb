@@ -163,7 +163,7 @@ func allToolDefinitions() []ToolDefinition {
 					"mode": map[string]any{
 						"type":        "string",
 						"enum":        []string{"semantic", "recent", "balanced", "deep"},
-						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — recency-biased, 1 hop (threshold=0.2)\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)",
+						"description": "Recall mode preset.\n• semantic  — precise vector search, 0 hops, ACT-R off\n• recent    — recency-biased, 1 hop\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops\nAll modes use a 0.1 similarity floor; modes differ by hops + weighting, not threshold.",
 					},
 					"since": map[string]any{
 						"type":        "string",

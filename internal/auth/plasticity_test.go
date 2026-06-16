@@ -472,6 +472,12 @@ func TestLookupRecallMode_RecentValues(t *testing.T) {
 	if p.MaxHops != 1 {
 		t.Errorf("recent MaxHops = %d, want 1", p.MaxHops)
 	}
+	// Regression (recall-mode bug 2026-06): recent MUST disable ACT-R. A partial
+	// weight override (handler wires only Sem/FTS/Recency of 6 dims) + ACT-R silently
+	// false-zeroed every recall (incl. today's memories). The additive path handles it.
+	if !p.DisableACTR {
+		t.Error("recent DisableACTR should be true -- partial weight override + ACT-R false-zeroes results")
+	}
 }
 
 func TestLookupRecallMode_BalancedIsZero(t *testing.T) {

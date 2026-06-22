@@ -111,7 +111,7 @@ func resolveEmbedInfo(cfg plugincfg.PluginConfig) rest.EmbedInfo {
 		return rest.EmbedInfo{Provider: "cohere", Model: "embed-v4"}
 	}
 	if os.Getenv("MUNINN_GOOGLE_KEY") != "" {
-		return rest.EmbedInfo{Provider: "google", Model: "text-embedding-004"}
+		return rest.EmbedInfo{Provider: "google", Model: "gemini-embedding-001"}
 	}
 	if os.Getenv("MUNINN_JINA_KEY") != "" {
 		return rest.EmbedInfo{Provider: "jina", Model: "jina-embeddings-v3"}
@@ -151,7 +151,7 @@ func resolveEmbedInfo(cfg plugincfg.PluginConfig) rest.EmbedInfo {
 	case "cohere":
 		return rest.EmbedInfo{Provider: "cohere", Model: "embed-v4"}
 	case "google":
-		return rest.EmbedInfo{Provider: "google", Model: "text-embedding-004"}
+		return rest.EmbedInfo{Provider: "google", Model: "gemini-embedding-001"}
 	case "jina":
 		return rest.EmbedInfo{Provider: "jina", Model: "jina-embeddings-v3"}
 	case "mistral":
@@ -398,7 +398,7 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 	// 1. Env var: Google
 	if key := os.Getenv(googleKey); key != "" {
 		slog.Info("initializing Google embedder")
-		if svc := tryEmbedService("google://text-embedding-004", plugin.PluginConfig{APIKey: key}); svc != nil {
+		if svc := tryEmbedService("google://gemini-embedding-001", plugin.PluginConfig{APIKey: key}); svc != nil {
 			return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
 		}
 	}
@@ -471,7 +471,7 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 			}
 		case "google":
 			slog.Info("initializing Google embedder from saved config")
-			if svc := tryEmbedService("google://text-embedding-004", plugin.PluginConfig{APIKey: cfg.EmbedAPIKey}); svc != nil {
+			if svc := tryEmbedService("google://gemini-embedding-001", plugin.PluginConfig{APIKey: cfg.EmbedAPIKey}); svc != nil {
 				return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
 			}
 		case "jina":

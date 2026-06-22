@@ -380,7 +380,7 @@ func printHelp() {
 	fmt.Printf("  %-28s %s\n", "MUNINN_OPENAI_URL", "Optional OpenAI base URL or provider URL override")
 	fmt.Printf("  %-28s %s\n", "MUNINN_VOYAGE_KEY", "Voyage AI embeddings API key (voyage-3, 1024d)")
 	fmt.Printf("  %-28s %s\n", "MUNINN_COHERE_KEY", "Cohere embeddings API key (embed-v4, 1024d)")
-	fmt.Printf("  %-28s %s\n", "MUNINN_GOOGLE_KEY", "Google Gemini embeddings API key (text-embedding-004, 768d)")
+	fmt.Printf("  %-28s %s\n", "MUNINN_GOOGLE_KEY", "Google Gemini embeddings API key (gemini-embedding-001)")
 	fmt.Printf("  %-28s %s\n", "MUNINN_JINA_KEY", "Jina embeddings API key (jina-embeddings-v3, 1024d)")
 	fmt.Printf("  %-28s %s\n", "MUNINN_MISTRAL_KEY", "Mistral embeddings API key (mistral-embed, 1024d)")
 	fmt.Println()

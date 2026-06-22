@@ -263,7 +263,7 @@ func parseGoogleURL(parsed *url.URL, config *ProviderConfig) (*ProviderConfig, e
 		}
 	}
 	if model == "" {
-		return nil, fmt.Errorf("google URL requires a model (e.g., google://text-embedding-004)")
+		return nil, fmt.Errorf("google URL requires a model (e.g., google://gemini-embedding-001)")
 	}
 	config.Model = model
 

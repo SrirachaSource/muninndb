@@ -283,8 +283,8 @@ func TestResolveEmbedInfo_EnvGoogle(t *testing.T) {
 	if info.Provider != "google" {
 		t.Errorf("expected provider=google, got %q", info.Provider)
 	}
-	if info.Model != "text-embedding-004" {
-		t.Errorf("expected model=text-embedding-004, got %q", info.Model)
+	if info.Model != "gemini-embedding-001" {
+		t.Errorf("expected model=gemini-embedding-001, got %q", info.Model)
 	}
 }
 
@@ -325,7 +325,7 @@ func TestResolveEmbedInfo_ConfigFallback(t *testing.T) {
 		{"openai", "openai", "text-embedding-3-small"},
 		{"voyage", "voyage", "voyage-3"},
 		{"cohere", "cohere", "embed-v4"},
-		{"google", "google", "text-embedding-004"},
+		{"google", "google", "gemini-embedding-001"},
 		{"jina", "jina", "jina-embeddings-v3"},
 		{"mistral", "mistral", "mistral-embed"},
 		{"none", "none", ""},

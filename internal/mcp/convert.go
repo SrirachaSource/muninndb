@@ -44,11 +44,16 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 // Entities and EntityRelationships are included when populated by the engine.
 func readResponseToMemory(r *mbp.ReadResponse) Memory {
 	m := Memory{
-		ID:          r.ID,
-		Concept:     r.Concept,
-		Content:     r.Content, // full content, no truncation
-		Summary:     r.Summary,
-		Confidence:  r.Confidence,
+		ID:      r.ID,
+		Concept: r.Concept,
+		Content: r.Content, // full content, no truncation
+		Summary: r.Summary,
+		// Carry the successor pointer through to the MCP surface: an agent reading
+		// an id it recorded in an earlier session must be told when that memory has
+		// since been evolved, or it acts on the superseded version believing it is
+		// current.
+		SupersededBy: r.SupersededBy,
+		Confidence:   r.Confidence,
 		Tags:        r.Tags,
 		State:       storage.LifecycleState(r.State).String(),
 		CreatedAt:   time.Unix(0, r.CreatedAt).UTC(),

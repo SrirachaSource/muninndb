@@ -1,0 +1,35 @@
+# Evolve-graph test fixture.
+#
+# A disposable, single-node muninndb used to prove end-to-end that an evolved
+# engram carries its graph and its epistemic state forward. Duplicated from the
+# repo-root docker-compose.yml and trimmed to what the fixture needs:
+#   - ports remapped into the 184xx range so it never collides with a real
+#     instance (or with the operator's live server) on the same host
+#   - data volume is anonymous, so `down -v` leaves nothing behind
+#   - no restart policy: a fixture that resurrects itself hides its own crash
+#
+# The image tag is injected so the SAME fixture can be pointed at a pre-fix and
+# a post-fix build without editing anything:
+#   MUNINN_IMAGE=muninndb:prefix  docker compose -f ... up -d
+#
+# Usage: see run_fixture.sh in this directory.
+
+services:
+  muninndb-fixture:
+    image: ${MUNINN_IMAGE:-muninndb:latest}
+    container_name: ${FIXTURE_NAME:-muninndb-fixture}
+    ports:
+      - "${FIXTURE_REST_PORT:-18475}:8475"   # REST API
+      - "${FIXTURE_MCP_PORT:-18750}:8750"    # MCP
+    environment:
+      MUNINN_LISTEN_HOST: "0.0.0.0"
+      MUNINN_MEM_LIMIT_GB: "2"
+      # No enrichment and no cloud embedder: the fixture must not depend on a
+      # network or an API key. The bundled local embedder is enough to write and
+      # read engrams, and enrichment is irrelevant to graph migration.
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8475/api/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s

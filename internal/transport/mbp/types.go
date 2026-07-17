@@ -125,6 +125,16 @@ type ReadResponse struct {
 	LastAccess     int64    `msgpack:"last_access"           json:"last_access"`
 	Summary        string   `msgpack:"summary,omitempty"     json:"summary,omitempty"`
 	KeyPoints      []string `msgpack:"key_points,omitempty"  json:"key_points,omitempty"`
+	// SupersededBy names the engram that replaced this one, when this engram has
+	// been evolved. Empty for a live engram.
+	//
+	// Evolve forks: the successor gets a NEW id and this engram is soft-deleted,
+	// but its id keeps resolving and keeps serving this (superseded) content. Any
+	// id written into a note, a doc or another system therefore becomes a silent
+	// stale pointer the moment the memory is evolved -- it still reads, and it
+	// still returns the version that was corrected. This field is how a holder of
+	// an old id learns there is a newer one.
+	SupersededBy string `msgpack:"superseded_by,omitempty" json:"superseded_by,omitempty"`
 	MemoryType     uint8    `msgpack:"memory_type" json:"memory_type"`
 	TypeLabel      string   `msgpack:"type_label,omitempty"  json:"type_label,omitempty"`
 	Classification uint16   `msgpack:"classification,omitempty" json:"classification,omitempty"`

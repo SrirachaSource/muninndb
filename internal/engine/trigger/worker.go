@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
@@ -289,7 +290,13 @@ func (w *TriggerWorker) sweepVault(ctx context.Context, vaultID uint32, ws [8]by
 
 		if len(vec) == 0 {
 			if w.embedder != nil {
-				computed, err := w.embedder.Embed(ctx, subCtx)
+				// Embed is a BATCH embedder: N texts -> N vectors FLATTENED. A
+				// subscription needs ONE embedding, so passing a multi-phrase
+				// sub.Context straight through stored an N*dim vector as a single
+				// embedding -- the same defect as the recall path in
+				// activation/engine.go. Join to one text so exactly one vector comes
+				// back; single-phrase behaviour is unchanged.
+				computed, err := w.embedder.Embed(ctx, []string{strings.Join(subCtx, " ")})
 				if err != nil {
 					continue
 				}

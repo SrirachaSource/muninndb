@@ -1645,6 +1645,56 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 }
 
 // Read implements mbp.EngineAPI.Read.
+// supersededBy returns the id of the engram that replaced eng, or "" if eng is
+// live (or has no recorded successor).
+//
+// Evolve forks rather than updating in place: the successor is written under a
+// NEW ULID and the predecessor is soft-deleted. But the predecessor's id keeps
+// resolving and Read keeps returning its content, with no error and no hint that
+// a corrected version exists -- so every id ever written into a note, a document
+// or another system silently becomes a stale pointer the moment that memory is
+// evolved. It does not break; it just starts answering with the version that was
+// corrected.
+//
+// The successor is already recoverable: Evolve writes a RelSupersedes edge from
+// the successor BACK to the predecessor, so the reverse index can name it. The
+// read path simply never asked. A superseded engram has always known what
+// replaced it.
+//
+// Only soft-deleted engrams are checked, so a live read costs nothing.
+func (e *Engine) supersededBy(ctx context.Context, wsPrefix [8]byte, eng *storage.Engram) string {
+	if eng == nil || eng.State != storage.StateSoftDeleted {
+		return ""
+	}
+	// Edges TARGETING eng. GetReverseAssociations reports the SOURCE of each edge
+	// in Association.TargetID, so a RelSupersedes hit names the successor.
+	rev, err := e.store.GetReverseAssociations(ctx, wsPrefix, eng.ID, supersededByScanLimit)
+	if err != nil {
+		// Non-fatal: a read must still succeed if the graph lookup fails. The
+		// caller is no worse off than before this field existed.
+		slog.Debug("engine: supersededBy lookup failed", "id", eng.ID.String(), "err", err)
+		return ""
+	}
+	// A predecessor is superseded once, but an engram can be evolved from a
+	// soft-deleted parent, which forks the chain. Prefer the most recent
+	// successor: ULIDs sort lexicographically by creation time.
+	var newest string
+	for _, a := range rev {
+		if a.RelType != storage.RelSupersedes {
+			continue
+		}
+		if s := a.TargetID.String(); s > newest {
+			newest = s
+		}
+	}
+	return newest
+}
+
+// supersededByScanLimit bounds the reverse-index scan used to name an engram's
+// successor. A superseded engram normally has exactly one RelSupersedes edge
+// pointing at it; the headroom covers forked chains.
+const supersededByScanLimit = 64
+
 func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadResponse, error) {
 	readStart := time.Now()
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
@@ -1723,6 +1773,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		UpdatedAt:      eng.UpdatedAt.UnixNano(),
 		LastAccess:     eng.LastAccess.UnixNano(),
 		Summary:        eng.Summary,
+		SupersededBy:   e.supersededBy(ctx, wsPrefix, eng),
 		KeyPoints:      eng.KeyPoints,
 		MemoryType:     uint8(eng.MemoryType),
 		TypeLabel:           eng.TypeLabel,
@@ -2669,10 +2720,18 @@ type EngineSessionEntry struct {
 	At      time.Time
 }
 
+// evolveMaxAssocMigration caps how many associations are carried from an evolved
+// engram onto its successor, in each direction. Hitting it is logged, never silent.
+const evolveMaxAssocMigration = 1000
+
 // Evolve creates a new version of an existing engram and soft-deletes the old one.
 // It links the new engram to the old one with RelSupersedes and returns the new ID.
-// All three writes (new engram, supersedes association, old engram state) are committed
-// in a single atomic Pebble batch so a crash cannot leave the store in an inconsistent state.
+// The new engram inherits the old engram's confidence, stability, tags and graph:
+// both its outbound edges and the edges that pointed AT it are migrated onto the
+// new id, wholesale, so learned Hebbian weights survive the revision.
+// All writes (new engram, supersedes association, migrated associations, old engram
+// state) are committed in a single atomic Pebble batch so a crash cannot leave the
+// store in an inconsistent state.
 func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32) (storage.ULID, error) {
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
@@ -2691,17 +2750,40 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 		return storage.ULID{}, fmt.Errorf("evolve: engram %s not found", oldID)
 	}
 
+	// Read the old engram's graph BEFORE opening the batch. Evolve mints a new
+	// ULID, so without this migration every edge stays bound to the id we are
+	// about to soft-delete and the new engram is born with exactly one
+	// association (supersedes -> the corpse). That silently drops `contradicts`
+	// edges in particular, which leaves a revised claim looking unchallenged.
+	oldFwd, err := e.store.GetAssociations(ctx, wsPrefix, []storage.ULID{oldULID}, evolveMaxAssocMigration)
+	if err != nil {
+		return storage.ULID{}, fmt.Errorf("evolve: read old forward associations: %w", err)
+	}
+	oldRev, err := e.store.GetReverseAssociations(ctx, wsPrefix, oldULID, evolveMaxAssocMigration)
+	if err != nil {
+		return storage.ULID{}, fmt.Errorf("evolve: read old reverse associations: %w", err)
+	}
+	// Never truncate a graph silently: a dropped edge is indistinguishable from
+	// an edge that never existed.
+	if len(oldFwd[oldULID]) >= evolveMaxAssocMigration || len(oldRev) >= evolveMaxAssocMigration {
+		slog.Warn("engine: evolve: association migration hit the cap; some edges were not migrated",
+			"id", oldID, "forward", len(oldFwd[oldULID]), "reverse", len(oldRev), "cap", evolveMaxAssocMigration)
+	}
+
 	// Build the new engram with a pre-assigned ULID so we can reference it in the
 	// supersedes association within the same batch.
 	newULID := storage.NewULID()
 	now := time.Now()
 	newEng := &storage.Engram{
-		ID:         newULID,
-		Concept:    oldEng.Concept + " (evolved)",
-		Content:    newContent,
-		Tags:       oldEng.Tags,
-		Confidence: 1.0,
-		Stability:  30.0,
+		ID:      newULID,
+		Concept: oldEng.Concept + " (evolved)",
+		Content: newContent,
+		Tags:    oldEng.Tags,
+		// Inherit the epistemic state. Hardcoding these manufactured certainty:
+		// revising a claim BECAUSE you are less sure of it must not return a
+		// more confident engram than the one it replaces.
+		Confidence: oldEng.Confidence,
+		Stability:  oldEng.Stability,
 		State:      storage.StateActive,
 		CreatedAt:  now,
 		UpdatedAt:  now,
@@ -2730,6 +2812,52 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	if err := batch.WriteAssociation(ctx, wsPrefix, newULID, oldULID, supersedes); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch write association: %w", err)
 	}
+
+	// Migrate the old engram's graph onto the new version, inside the same batch
+	// so an evolve is still all-or-nothing. Each Association is copied WHOLESALE:
+	// Weight, PeakWeight, CoActivationCount and LastActivated are the learned
+	// Hebbian state, and rebuilding an edge from scratch would silently reset the
+	// very history that makes the edge worth keeping.
+	//
+	// This is additive: the old engram keeps its own edges, so a soft-deleted
+	// engram stays restorable with its graph intact.
+	//
+	// NOTE (semantics, deliberately conservative): every relation type is
+	// migrated, including `contradicts`. Migrating a contradiction that has since
+	// been resolved leaves a visible, re-evaluable edge; DROPPING one leaves
+	// nothing at all. A stale edge is auditable, an absent edge is invisible --
+	// so this errs toward keeping. Whether Enrich should re-adjudicate semantic
+	// relations after an evolve is a live design question, not something this
+	// change decides.
+	// RelSupersedes is NEVER migrated, in either direction. It is the version-chain
+	// link and each Evolve writes its own (new -> old, above). Copying it forward
+	// makes every descendant claim to supersede the original directly, which
+	// flattens the chain and destroys the immediate-predecessor relationship a
+	// reader needs to walk it one hop at a time.
+	for _, a := range oldFwd[oldULID] {
+		if a.RelType == storage.RelSupersedes {
+			continue
+		}
+		assoc := a // copy; preserves Hebbian counters
+		if err := batch.WriteAssociation(ctx, wsPrefix, newULID, assoc.TargetID, &assoc); err != nil {
+			return storage.ULID{}, fmt.Errorf("evolve: batch migrate forward association: %w", err)
+		}
+	}
+	for _, a := range oldRev {
+		if a.RelType == storage.RelSupersedes {
+			continue
+		}
+		// GetReverseAssociations returns edges that TARGET oldULID, with
+		// Association.TargetID carrying the SOURCE engram. Re-point a copy at the
+		// new version, keeping the original source as the edge's origin.
+		srcULID := a.TargetID
+		assoc := a // copy; preserves Hebbian counters
+		assoc.TargetID = newULID
+		if err := batch.WriteAssociation(ctx, wsPrefix, srcULID, newULID, &assoc); err != nil {
+			return storage.ULID{}, fmt.Errorf("evolve: batch migrate reverse association: %w", err)
+		}
+	}
+
 	if err := batch.UpdateEngramState(ctx, wsPrefix, oldULID, storage.StateSoftDeleted); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch update old state: %w", err)
 	}

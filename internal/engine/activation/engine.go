@@ -494,7 +494,19 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 	// benchmarks and lightweight deployments), this avoids the hashEmbedder
 	// CPU cost entirely (~13% of activation CPU).
 	if e.embedder != nil && e.hnsw != nil {
-		vec, err := e.embedder.Embed(ctx, req.Context)
+		// Embed is a BATCH embedder: N texts -> N vectors FLATTENED (len == N*dim).
+		// That contract is deliberate and other callers rely on it (see
+		// brief_scorer_adapter, which derives dim as len(flat)/len(texts)). A QUERY
+		// needs ONE vector, so passing req.Context (a []string) straight through
+		// produced an N*dim vector for multi-phrase contexts -- malformed for the
+		// dim-sized HNSW index, which then scored semantic similarity as exactly 0
+		// and left FTS/recency alone deciding rank.
+		//
+		// Embed the SAME queryStr already joined above for Tokenize and the FTS
+		// query: the vector query and the text query are then identical by
+		// construction, which is the invariant that was silently broken here.
+		// Single-phrase behaviour is unchanged (a join of one element is itself).
+		vec, err := e.embedder.Embed(ctx, []string{result.queryStr})
 		if err != nil {
 			return nil, fmt.Errorf("phase1 embed: %w", err)
 		}

@@ -63,7 +63,12 @@ type Memory struct {
 	Concept     string    `json:"concept"`
 	Content     string    `json:"content"` // recall: summary or 500-char preview; read: full content
 	Summary     string    `json:"summary,omitempty"`
-	Score       float64   `json:"score,omitempty"`
+	// SupersededBy names the engram that replaced this one (read only; empty for a
+	// live engram). An evolved memory keeps its old id resolving and keeps serving
+	// its superseded content, so without this an agent holding an id from an older
+	// session is silently handed the version that was corrected.
+	SupersededBy string    `json:"superseded_by,omitempty"`
+	Score        float64   `json:"score,omitempty"`
 	VectorScore float64   `json:"vector_score,omitempty"`
 	Confidence  float32   `json:"confidence"`
 	Why         string    `json:"why,omitempty"`

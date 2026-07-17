@@ -641,8 +641,23 @@ func decodeNeighbors(buf []byte) [][16]byte {
 // LoadFromPebble reads all HNSW nodes from Pebble into memory.
 // Loads into temporary structures first and only applies on success to maintain consistency.
 func (idx *Index) LoadFromPebble() error {
-	lowerBound := []byte{0x07}
-	upperBound := []byte{0x08}
+	// Scope the scan to THIS index's workspace. HNSWNodeKey lays a node key out
+	// as 0x07|ws(8)|id(16)|slot(1), so an unbounded [0x07,0x08) scan walks EVERY
+	// vault's nodes and loads them into this one index -- cross-vault search
+	// contamination, and memory multiplied by the vault count (on the live floor
+	// that was ~38.4k vectors x 3072 dims x 4B = ~472MB per index, x17 vaults
+	// = ~8GB, which is the exhaustion that wedged the engine on 2026-07-16).
+	lowerBound := make([]byte, 9)
+	lowerBound[0] = 0x07
+	copy(lowerBound[1:], idx.ws[:])
+
+	wsPlus, err := keys.IncrementWSPrefix(idx.ws)
+	if err != nil {
+		return fmt.Errorf("hnsw: LoadFromPebble ws bound: %w", err)
+	}
+	upperBound := make([]byte, 9)
+	upperBound[0] = 0x07
+	copy(upperBound[1:], wsPlus[:])
 
 	iter, err := idx.db.NewIter(&pebble.IterOptions{
 		LowerBound: lowerBound,

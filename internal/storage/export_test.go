@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"github.com/scrypster/muninndb/internal/storage/keys"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -322,5 +323,104 @@ func TestImport_LegacyNoChecksum(t *testing.T) {
 	}
 	if iResult.EngramCount != 0 {
 		t.Errorf("expected 0 engrams from empty legacy archive, got %d", iResult.EngramCount)
+	}
+}
+
+// TestExportImportRoundtrip_EntityGraphSurvives is the regression lock for the
+// 2026-07-17 finding: vault exports silently omitted the entity graph — 0x20
+// forward links and 0x21 relationship records were not in the export prefix
+// list, so every R2 backup was missing them and a disaster restore would have
+// lost the graph. Export now carries 0x20/0x21; import rebuilds the 0x23
+// reverse index from each 0x20 key and seeds minimal global 0x1F records so
+// imported entities resolve.
+func TestExportImportRoundtrip_EntityGraphSurvives(t *testing.T) {
+	src := openTestStore(t)
+	dst := openTestStore(t)
+	ctx := context.Background()
+
+	ws := src.VaultPrefix("ent-src")
+	if err := src.WriteVaultName(ws, "ent-src"); err != nil {
+		t.Fatalf("WriteVaultName: %v", err)
+	}
+
+	id, err := src.WriteEngram(ctx, ws, &Engram{
+		Concept: "entity carrier",
+		Content: "Alice works with Bob.",
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	// Entity records + engram links + a relationship record on the source.
+	for _, name := range []string{"Alice", "Bob"} {
+		if err := src.UpsertEntityRecord(ctx, EntityRecord{
+			Name: name, Type: "person", Confidence: 0.9, Source: "inline", State: "active",
+		}, "inline"); err != nil {
+			t.Fatalf("UpsertEntityRecord(%s): %v", name, err)
+		}
+		if err := src.WriteEntityEngramLink(ctx, ws, id, name); err != nil {
+			t.Fatalf("WriteEntityEngramLink(%s): %v", name, err)
+		}
+	}
+	if err := src.UpsertRelationshipRecord(ctx, ws, id, RelationshipRecord{
+		FromEntity: "Alice", ToEntity: "Bob", RelType: "works_with",
+		Weight: 0.9, Source: "inline",
+	}); err != nil {
+		t.Fatalf("UpsertRelationshipRecord: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := src.ExportVaultData(ctx, ws, "ent-src", ExportOpts{}, &buf); err != nil {
+		t.Fatalf("ExportVaultData: %v", err)
+	}
+
+	wsB := dst.VaultPrefix("ent-dst")
+	if err := dst.WriteVaultName(wsB, "ent-dst"); err != nil {
+		t.Fatalf("dst WriteVaultName: %v", err)
+	}
+	if _, err := dst.ImportVaultData(ctx, wsB, "ent-dst", ImportOpts{}, bytes.NewReader(buf.Bytes())); err != nil {
+		t.Fatalf("ImportVaultData: %v", err)
+	}
+
+	// Forward links (0x20) present on the destination.
+	var linked []string
+	if err := dst.ScanEngramEntities(ctx, wsB, id, func(name string) error {
+		linked = append(linked, name)
+		return nil
+	}); err != nil {
+		t.Fatalf("ScanEngramEntities: %v", err)
+	}
+	if len(linked) != 2 {
+		t.Fatalf("imported engram entity links: got %v, want [Alice Bob]", linked)
+	}
+
+	// Relationship records (0x21) present.
+	var rels []RelationshipRecord
+	if err := dst.ScanEngramRelationships(ctx, wsB, id, func(r RelationshipRecord) error {
+		rels = append(rels, r)
+		return nil
+	}); err != nil {
+		t.Fatalf("ScanEngramRelationships: %v", err)
+	}
+	if len(rels) != 1 || rels[0].RelType != "works_with" {
+		t.Fatalf("imported relationships: got %+v, want one works_with", rels)
+	}
+
+	// Reverse index (0x23) rebuilt: entity->engram lookup finds the engram.
+	for _, name := range []string{"Alice", "Bob"} {
+		revKey := keys.EntityReverseIndexKey(keys.EntityNameHash(name), wsB, [16]byte(id))
+		_, closer, err := dst.db.Get(revKey)
+		if err != nil {
+			t.Fatalf("0x23 reverse key missing for %s after import: %v", name, err)
+		}
+		closer.Close()
+	}
+
+	// Global 0x1F records seeded on the destination store.
+	for _, name := range []string{"Alice", "Bob"} {
+		rec, err := dst.GetEntityRecord(ctx, name)
+		if err != nil || rec == nil {
+			t.Fatalf("entity record %q not seeded on destination: %v", name, err)
+		}
 	}
 }

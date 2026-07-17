@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+
+	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
 // vaultScopedExportPrefixes lists every prefix scoped by a vault workspace
@@ -46,7 +48,16 @@ var vaultScopedExportPrefixes = []byte{
 	0x18, // standalone embeddings (ERF v2 EmbeddingKey)
 	0x1A, // episode keys (EpisodeKey + EpisodeFrameKey)
 	0x1B, // FTS schema version marker
+	0x20, // engram→entity forward links (value = entity name)
+	0x21, // entity-to-entity relationship records
+	0x24, // entity co-occurrence counts
+	0x26, // relationship entity index
 	0x28, // content-hash dedup index
+	// 0x23 (entity→engram reverse index) is NOT exported: its ws sits at bytes
+	// 9-16 (after the name hash), which the strip/reinsert format can't carry.
+	// Import rebuilds it from each 0x20 key instead. 0x1F (global entity
+	// records) is vault-agnostic and likewise excluded; import re-seeds a
+	// minimal record per imported entity name so lookups resolve.
 }
 
 const exportBatchSize = 512
@@ -302,6 +313,10 @@ func (ps *PebbleStore) ImportVaultData(
 	}
 	var kv *kvState
 
+	// Entity names seen on imported 0x20 links; used to re-seed minimal global
+	// 0x1F entity records after commit (0x1F is vault-agnostic, not exported).
+	importedEntityNames := make(map[string]struct{})
+
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -427,8 +442,9 @@ func (ps *PebbleStore) ImportVaultData(
 				// Each key type has the engram ID at a specific offset in the stripped key.
 				if len(skipIDs) > 0 {
 					switch prefix {
-					case 0x02, 0x07, 0x16, 0x18:
-						// MetaKey, HNSWNodeKey, ProvenanceKey, EmbeddingKey:
+					case 0x02, 0x07, 0x16, 0x18, 0x20, 0x21:
+						// MetaKey, HNSWNodeKey, ProvenanceKey, EmbeddingKey,
+						// EntityEngramLinkKey, EntityRelationshipKey:
 						// stripped layout: [prefix(1)][id(16)]...  — ID at bytes 1:17
 						if len(strippedKey) >= 17 {
 							var id [16]byte
@@ -473,6 +489,17 @@ func (ps *PebbleStore) ImportVaultData(
 				batch.Set(fullKey, val, nil)
 				if strippedKey[0] == 0x01 {
 					engramCount++
+				}
+				// Entity forward link: rebuild the 0x23 reverse index entry
+				// (not exportable — its ws sits after the name hash) and note
+				// the entity name for post-import 0x1F record seeding.
+				if prefix == 0x20 && len(strippedKey) >= 25 {
+					var engID [16]byte
+					copy(engID[:], strippedKey[1:17])
+					var nameHash [8]byte
+					copy(nameHash[:], strippedKey[17:25])
+					batch.Set(keys.EntityReverseIndexKey(nameHash, wsTarget, engID), nil, nil)
+					importedEntityNames[string(val)] = struct{}{}
 				}
 				totalKeys++
 				batchCount++
@@ -529,6 +556,8 @@ func (ps *PebbleStore) ImportVaultData(
 			// Seed the in-memory vault counter.
 			vc := ps.getOrInitCounter(ctx, wsTarget)
 			vc.count.Store(kv.engramCount)
+
+			ps.seedImportedEntityRecords(ctx, importedEntityNames)
 		}
 	}
 
@@ -548,6 +577,8 @@ func (ps *PebbleStore) ImportVaultData(
 		// Seed the in-memory vault counter.
 		vc := ps.getOrInitCounter(ctx, wsTarget)
 		vc.count.Store(kv.engramCount)
+
+		ps.seedImportedEntityRecords(ctx, importedEntityNames)
 
 		return &ExportResult{
 			EngramCount: kv.engramCount,
@@ -590,4 +621,31 @@ func (ps *PebbleStore) ImportVaultData(
 
 	// Should not be reached.
 	return &ExportResult{EngramCount: 0, TotalKeys: 0}, nil
+}
+
+// seedImportedEntityRecords writes a minimal global 0x1F entity record for any
+// imported entity name that has none. 0x1F records are vault-agnostic and are
+// not part of a vault export; without this, imported 0x20/0x21 links would
+// reference entities that resolve to nothing. Existing records are never
+// overwritten (UpsertEntityRecord preserves higher-confidence data), and the
+// low confidence + "import" source mark these as reconstructable stubs that
+// enrichment can later refine.
+func (ps *PebbleStore) seedImportedEntityRecords(ctx context.Context, names map[string]struct{}) {
+	for name := range names {
+		if name == "" {
+			continue
+		}
+		rec, err := ps.GetEntityRecord(ctx, name)
+		if err == nil && rec != nil {
+			continue
+		}
+		if err := ps.UpsertEntityRecord(ctx, EntityRecord{
+			Name:       name,
+			Confidence: 0.5,
+			Source:     "import",
+			State:      "active",
+		}, "import"); err != nil {
+			slog.Warn("import: seed entity record failed", "entity", name, "error", err)
+		}
+	}
 }

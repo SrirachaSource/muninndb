@@ -63,6 +63,8 @@ func main() {
 		runDream(rest)
 	case "backup":
 		runBackup(rest)
+	case "reindex":
+		runReindex(rest)
 	case "upgrade":
 		runUpgrade(rest)
 	case "restart":

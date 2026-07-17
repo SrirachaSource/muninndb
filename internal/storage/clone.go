@@ -46,6 +46,9 @@ var vaultScopedSwapPrefixes = []byte{
 	0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 	0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x10, 0x14,
 	0x15, 0x16, 0x17,
+	0x18, // standalone ERF v2 embeddings (0x18|ws|ulid) — omitting this dropped
+	//      every merged/cloned engram's vector, leaving reindexVault blind to
+	//      them (2026-07-17 trading-vault surgery, obligation 01KXS1XQ5F)
 	0x28, // content-hash dedup index
 }
 

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"testing"
@@ -396,5 +397,83 @@ func TestCloneVaultData_CrossVaultIsolation(t *testing.T) {
 	srcCountAfter := store.GetVaultCount(ctx, wsSrc)
 	if srcCountAfter != srcCountBefore {
 		t.Errorf("source vault count changed from %d to %d after clone", srcCountBefore, srcCountAfter)
+	}
+}
+
+// TestMergeVaultData_EmbeddingRecordsSurvive is the regression lock for the
+// 2026-07-17 finding (obligation 01KXS1XQ5F): vaultScopedSwapPrefixes lacked
+// 0x18, so MergeVaultData silently dropped every merged engram's standalone
+// ERF v2 embedding record — post-merge reindexVault was blind to them and the
+// only workaround was a full offline reindex.
+func TestMergeVaultData_EmbeddingRecordsSurvive(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	wsSrc := store.VaultPrefix("emb-src")
+	wsDst := store.VaultPrefix("emb-dst")
+
+	id, err := store.WriteEngram(ctx, wsSrc, &Engram{
+		Concept: "vectored",
+		Content: "engram with a standalone embedding record",
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	// Plant a standalone 0x18 embedding record for the source engram.
+	embKey := keys.EmbeddingKey(wsSrc, [16]byte(id))
+	embVal := []byte{1, 2, 3, 4, 5, 6, 7, 8, 42, 43, 44}
+	if err := store.db.Set(embKey, embVal, nil); err != nil {
+		t.Fatalf("plant embedding: %v", err)
+	}
+
+	if _, err := store.MergeVaultData(ctx, wsSrc, wsDst, nil); err != nil {
+		t.Fatalf("MergeVaultData: %v", err)
+	}
+
+	got, closer, err := store.db.Get(keys.EmbeddingKey(wsDst, [16]byte(id)))
+	if err != nil {
+		t.Fatalf("target embedding record missing after merge (0x18 dropped): %v", err)
+	}
+	defer closer.Close()
+	if !bytes.Equal(got, embVal) {
+		t.Errorf("embedding bytes mismatch after merge: got %v want %v", got, embVal)
+	}
+}
+
+// TestCloneVaultData_EmbeddingRecordsSurvive: same lock for the clone path,
+// which iterates the same prefix list.
+func TestCloneVaultData_EmbeddingRecordsSurvive(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	wsSrc := store.VaultPrefix("emb-clone-src")
+	wsDst := store.VaultPrefix("emb-clone-dst")
+
+	id, err := store.WriteEngram(ctx, wsSrc, &Engram{
+		Concept: "vectored",
+		Content: "engram with a standalone embedding record",
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	embKey := keys.EmbeddingKey(wsSrc, [16]byte(id))
+	embVal := []byte{9, 9, 9, 1, 2, 3}
+	if err := store.db.Set(embKey, embVal, nil); err != nil {
+		t.Fatalf("plant embedding: %v", err)
+	}
+
+	if _, err := store.CloneVaultData(ctx, wsSrc, wsDst, nil); err != nil {
+		t.Fatalf("CloneVaultData: %v", err)
+	}
+
+	got, closer, err := store.db.Get(keys.EmbeddingKey(wsDst, [16]byte(id)))
+	if err != nil {
+		t.Fatalf("target embedding record missing after clone (0x18 dropped): %v", err)
+	}
+	defer closer.Close()
+	if !bytes.Equal(got, embVal) {
+		t.Errorf("embedding bytes mismatch after clone: got %v want %v", got, embVal)
 	}
 }

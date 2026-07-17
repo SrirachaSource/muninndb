@@ -411,6 +411,15 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 	}
 
 	// Phase 2: insert at each layer from min(level, maxLevel) down to 0
+	//
+	// Track every neighbor whose list we mutate: their back-links must reach
+	// Pebble too. Persisting only the new node leaves the on-disk graph with
+	// forward edges only (new -> old); after a restart, LoadFromPebble rebuilds
+	// that DAG and search from the (old) entry point can never reach nodes
+	// inserted after the reachable core -- semantic recall silently shrinks to
+	// the oldest cluster. Measured on the 2026-07-17 floor exports: 955,876
+	// persisted layer-0 edges in the trading vault, FOUR reciprocal.
+	mutated := make(map[[16]byte]*HNSWNode)
 	for l := min(level, idx.maxLevel); l >= 0; l-- {
 		neighbors := idx.searchLayer(ep, vector, idx.efC(), l)
 		M := M
@@ -444,6 +453,7 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 				nbNode.layers[l] = nbNode.layers[l][:maxConn]
 			}
 			nbNode.mu.Unlock()
+			mutated[nb.id] = nbNode
 		}
 
 		if len(neighbors) > 0 {
@@ -453,6 +463,13 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 
 	idx.persistWg.Add(1)
 	go idx.persistNode(id, node)
+	// Persist the mutated neighbors so their back-links survive a reload.
+	// persistNode snapshots the node's layers under its own lock at write time,
+	// so a neighbor touched at several layers needs only one persist.
+	for nbID, nbNode := range mutated {
+		idx.persistWg.Add(1)
+		go idx.persistNode(nbID, nbNode)
+	}
 }
 
 func (idx *Index) greedyDescend(ep [16]byte, epVec, query []float32, l int, newEP *[16]byte) []float32 {

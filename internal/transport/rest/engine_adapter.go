@@ -144,15 +144,26 @@ func (w *RESTEngineWrapper) ListEngrams(ctx context.Context, req *ListEngramsReq
 
 	engrams := make([]EngramItem, len(result.Engrams))
 	for i, eng := range result.Engrams {
+		// Entity count only for the returned page (not the full scan) — one
+		// 0x20 prefix seek per row, passive.
+		entityCount, ecErr := w.engine.CountEngramEntities(ctx, req.Vault, eng.ID)
+		if ecErr != nil {
+			entityCount = -1 // unknown; consumers must fail toward protection
+		}
 		engrams[i] = EngramItem{
-			ID:         eng.ID.String(),
-			Concept:    eng.Concept,
-			Content:    eng.Content,
-			Confidence: eng.Confidence,
-			Tags:       eng.Tags,
-			Vault:      req.Vault,
-			CreatedAt:  eng.CreatedAt.Unix(),
-			EmbedDim:   uint8(eng.EmbedDim),
+			ID:          eng.ID.String(),
+			Concept:     eng.Concept,
+			Content:     eng.Content,
+			Confidence:  eng.Confidence,
+			Tags:        eng.Tags,
+			Vault:       req.Vault,
+			CreatedAt:   eng.CreatedAt.Unix(),
+			EmbedDim:    uint8(eng.EmbedDim),
+			Summary:     eng.Summary,
+			TypeLabel:   eng.TypeLabel,
+			LastAccess:  eng.LastAccess.Unix(),
+			AccessCount: eng.AccessCount,
+			EntityCount: entityCount,
 		}
 	}
 	return &ListEngramsResponse{

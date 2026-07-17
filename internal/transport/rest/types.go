@@ -157,6 +157,17 @@ type EngramItem struct {
 	// EmbedDim is the stored embedding dimensionality code (0 = no embedding).
 	// 1 = 384-dim, 2 = 768-dim, 3 = 1536-dim, 4 = 3072-dim, 255 = embedded (unknown dimension).
 	EmbedDim uint8 `json:"embed_dim,omitempty"`
+	// Passive metadata for scan consumers (e.g. the winnow janitor), so that
+	// classification never needs a Read — Read fires implicit access feedback,
+	// which would warm the very cold-signal a janitor scores against.
+	Summary   string `json:"summary,omitempty"`
+	TypeLabel string `json:"type_label,omitempty"`
+	// LastAccess/AccessCount are deliberately NOT omitempty: their presence
+	// distinguishes a zero value from an old server that lacks the field.
+	LastAccess  int64  `json:"last_access"`  // unix seconds
+	AccessCount uint32 `json:"access_count"`
+	// EntityCount is the 0x20 forward-index entity count; -1 = count failed.
+	EntityCount int `json:"entity_count"`
 }
 
 // ListEngramsRequest lists engrams for a vault with optional filtering and sorting.

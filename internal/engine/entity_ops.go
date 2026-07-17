@@ -140,3 +140,17 @@ func (e *Engine) ListEntities(ctx context.Context, vault string, limit int, stat
 	}
 	return records, nil
 }
+
+// CountEngramEntities returns the number of entities linked to an engram in
+// the 0x20 forward index. Passive: no feedback signal, no activity tracking —
+// safe for scan consumers (list surfaces, janitors) that must not warm the
+// engrams they inspect.
+func (e *Engine) CountEngramEntities(ctx context.Context, vault string, id storage.ULID) (int, error) {
+	ws := e.store.ResolveVaultPrefix(vault)
+	n := 0
+	err := e.store.ScanEngramEntities(ctx, ws, id, func(string) error {
+		n++
+		return nil
+	})
+	return n, err
+}

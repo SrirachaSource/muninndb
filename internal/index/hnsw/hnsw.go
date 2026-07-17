@@ -392,10 +392,16 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 		return
 	}
 
-	if level > idx.maxLevel {
-		idx.entryPoint = id
-		idx.maxLevel = level
-	}
+	// Wire FIRST, promote AFTER. Promoting a high-level draw to entry point
+	// before wiring made `ep := idx.entryPoint` resolve to the brand-new node
+	// itself -- searchLayer then explored from a node with zero out-edges,
+	// found nothing but the new cluster, and the ENTIRE pre-existing graph
+	// became unreachable from the new entry. Every level-up event fractured
+	// the graph into a fresh island (trading vault: 13 disconnected
+	// components; a 40-node control built by this code reached 3 nodes from
+	// its entry). Standard HNSW searches from the OLD entry at the OLD max
+	// level, wires the new node in, and only then promotes it.
+	oldMaxLevel := idx.maxLevel
 
 	ep := idx.entryPoint
 	var epVec []float32
@@ -403,9 +409,9 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 		epVec = epNode.vec
 	}
 
-	// Phase 1: greedy descent from maxLevel to level+1 (only if epVec exists)
+	// Phase 1: greedy descent from oldMaxLevel to level+1 (only if epVec exists)
 	if epVec != nil {
-		for l := idx.maxLevel; l > level; l-- {
+		for l := oldMaxLevel; l > level; l-- {
 			epVec = idx.greedyDescend(ep, epVec, vector, l, &ep)
 		}
 	}
@@ -420,7 +426,7 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 	// the oldest cluster. Measured on the 2026-07-17 floor exports: 955,876
 	// persisted layer-0 edges in the trading vault, FOUR reciprocal.
 	mutated := make(map[[16]byte]*HNSWNode)
-	for l := min(level, idx.maxLevel); l >= 0; l-- {
+	for l := min(level, oldMaxLevel); l >= 0; l-- {
 		neighbors := idx.searchLayer(ep, vector, idx.efC(), l)
 		M := M
 		if l == 0 {
@@ -448,9 +454,22 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 			nbNode.layers[l] = append(nbNode.layers[l], id)
 			maxConn := maxConnections(l)
 			if len(nbNode.layers[l]) > maxConn {
-				// Prune: keep strongest connections
-				// Simple pruning: truncate (production would use heuristic select)
-				nbNode.layers[l] = nbNode.layers[l][:maxConn]
+				// Prune by DISTANCE, keeping the maxConn nearest to this
+				// neighbor. The old code truncated the slice tail -- but the
+				// just-appended back-link sits at the tail, so a full list
+				// dropped every NEW edge and late inserts became one-way
+				// islands (the last 6 nodes of a 40-node control were
+				// unreachable through exactly this).
+				nbVec := nbNode.vec
+				list := nbNode.layers[l]
+				sort.Slice(list, func(a, b int) bool {
+					na, nb2 := idx.nodes[list[a]], idx.nodes[list[b]]
+					if na == nil || nb2 == nil {
+						return nb2 == nil && na != nil
+					}
+					return CosineSimilarity(nbVec, na.vec) > CosineSimilarity(nbVec, nb2.vec)
+				})
+				nbNode.layers[l] = list[:maxConn]
 			}
 			nbNode.mu.Unlock()
 			mutated[nb.id] = nbNode
@@ -459,6 +478,12 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 		if len(neighbors) > 0 {
 			ep = neighbors[0].id
 		}
+	}
+
+	// Promote AFTER wiring (see comment above phase 1).
+	if level > idx.maxLevel {
+		idx.entryPoint = id
+		idx.maxLevel = level
 	}
 
 	idx.persistWg.Add(1)

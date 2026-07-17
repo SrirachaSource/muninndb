@@ -110,6 +110,10 @@ type EngineAPI interface {
 	// allowing the RetroactiveProcessor to re-embed everything with the current model.
 	// Returns a Job immediately (202 pattern).
 	StartReembedVault(ctx context.Context, vaultName, modelName string) (*vaultjob.Job, error)
+	// StartReembedMissing clears embed flags for ONLY unembedded engrams
+	// (EmbedDim == 0) and wakes the RetroactiveProcessor — partial-coverage
+	// backfill that never drops a healthy vector.
+	StartReembedMissing(ctx context.Context, vaultName string) (*vaultjob.Job, error)
 	// CountEmbedded returns the number of engrams with the DigestEmbed flag set.
 	CountEmbedded(ctx context.Context) int64
 	// Observability returns the full system observability snapshot.

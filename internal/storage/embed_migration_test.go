@@ -296,3 +296,100 @@ func TestClearEmbedFlagsForVault_DigestEmbedFailed(t *testing.T) {
 		t.Errorf("DigestEmbedFailed (0x80) still set after clear: flags = 0x%02x", flags)
 	}
 }
+
+// TestClearEmbedFlagsForMissing verifies the targeted variant touches ONLY
+// engrams with no embedding: unembedded engrams get their embed-done/failed
+// flags cleared (so the RetroactiveProcessor retries them) while embedded
+// engrams keep their flags AND their 0x18 records — nothing healthy is
+// disturbed. Regression lock for the 2026-07-17 partial-coverage finding
+// (2,190 engrams stuck on DigestEmbedFailed with no retry path that didn't
+// nuke the whole vault).
+func TestClearEmbedFlagsForMissing(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("embed-missing-test")
+
+	const DigestEmbed uint8 = 0x02
+	const DigestEmbedFailed uint8 = 0x80
+
+	// One EMBEDDED engram (has a vector -> EmbedDim != 0) with flag set.
+	embedded, err := store.WriteEngram(ctx, ws, &Engram{
+		Concept:   "embedded",
+		Content:   "has a vector",
+		Embedding: []float32{0.1, 0.2, 0.3},
+		EmbedDim:  EmbedDimension(1),
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram embedded: %v", err)
+	}
+	if err := store.SetDigestFlag(ctx, embedded, DigestEmbed); err != nil {
+		t.Fatalf("SetDigestFlag embedded: %v", err)
+	}
+
+	// One UNEMBEDDED engram stuck on the failed flag (the outage-era shape).
+	stuck, err := store.WriteEngram(ctx, ws, &Engram{
+		Concept: "stuck",
+		Content: "embed failed during the outage",
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram stuck: %v", err)
+	}
+	if err := store.SetDigestFlag(ctx, stuck, DigestEmbedFailed); err != nil {
+		t.Fatalf("SetDigestFlag stuck: %v", err)
+	}
+
+	// One UNEMBEDDED engram with no digest record at all (fresh-import shape).
+	bare, err := store.WriteEngram(ctx, ws, &Engram{
+		Concept: "bare",
+		Content: "no digest record",
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram bare: %v", err)
+	}
+
+	cleared, err := store.ClearEmbedFlagsForMissing(ctx, ws)
+	if err != nil {
+		t.Fatalf("ClearEmbedFlagsForMissing: %v", err)
+	}
+	// stuck (flag cleared) + bare (zero record written) = 2; embedded untouched.
+	if cleared != 2 {
+		t.Errorf("cleared = %d, want 2", cleared)
+	}
+
+	// Embedded engram keeps its flag.
+	flags, err := store.GetDigestFlags(ctx, embedded)
+	if err != nil {
+		t.Fatalf("GetDigestFlags embedded: %v", err)
+	}
+	if flags&DigestEmbed == 0 {
+		t.Errorf("embedded engram lost its DigestEmbed flag — targeted clear touched a healthy engram")
+	}
+
+	// Stuck engram's failed flag is cleared.
+	flags, err = store.GetDigestFlags(ctx, stuck)
+	if err != nil {
+		t.Fatalf("GetDigestFlags stuck: %v", err)
+	}
+	if flags&(DigestEmbed|DigestEmbedFailed) != 0 {
+		t.Errorf("stuck engram still carries embed flags: %#x", flags)
+	}
+
+	// Bare engram now has an explicit zero record (processor sees it pending).
+	flags, err = store.GetDigestFlags(ctx, bare)
+	if err != nil {
+		t.Fatalf("GetDigestFlags bare: %v", err)
+	}
+	if flags&(DigestEmbed|DigestEmbedFailed) != 0 {
+		t.Errorf("bare engram carries embed flags: %#x", flags)
+	}
+
+	// Idempotent: second run clears the two unembedded again is a no-op only if
+	// records exist with bits clear — expect 0.
+	cleared2, err := store.ClearEmbedFlagsForMissing(ctx, ws)
+	if err != nil {
+		t.Fatalf("ClearEmbedFlagsForMissing (second): %v", err)
+	}
+	if cleared2 != 0 {
+		t.Errorf("second run cleared %d, want 0 (idempotent)", cleared2)
+	}
+}

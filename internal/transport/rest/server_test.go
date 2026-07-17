@@ -298,6 +298,10 @@ func (m *MockEngine) StartReembedVault(ctx context.Context, vaultName, modelName
 	return &vaultjob.Job{ID: "mock-reembed-job", Operation: "reembed", Source: vaultName, Target: vaultName}, nil
 }
 
+func (m *MockEngine) StartReembedMissing(ctx context.Context, vaultName string) (*vaultjob.Job, error) {
+	return &vaultjob.Job{ID: "mock-reembed-missing-job", Operation: "reembed-missing", Source: vaultName, Target: vaultName}, nil
+}
+
 func (m *MockEngine) CountEmbedded(ctx context.Context) int64 {
 	return 42
 }

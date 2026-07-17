@@ -301,6 +301,10 @@ func (w *RESTEngineWrapper) StartReembedVault(ctx context.Context, vaultName, mo
 	return w.engine.StartReembedVault(ctx, vaultName, modelName)
 }
 
+func (w *RESTEngineWrapper) StartReembedMissing(ctx context.Context, vaultName string) (*vaultjob.Job, error) {
+	return w.engine.StartReembedMissing(ctx, vaultName)
+}
+
 func (w *RESTEngineWrapper) RenameVault(ctx context.Context, oldName, newName string) error {
 	return w.engine.RenameVault(ctx, oldName, newName)
 }

@@ -120,3 +120,83 @@ func (e *Engine) runReembed(job *vaultjob.Job, ws [8]byte, vaultName string) {
 
 	e.jobManager.Complete(job)
 }
+
+// StartReembedMissing clears embed digest flags for ONLY the engrams in the
+// vault that have no embedding (EmbedDim == 0) and wakes the
+// RetroactiveProcessor to backfill them. Existing vectors, the HNSW index, and
+// the embed model marker are untouched — recall stays fully semantic on the
+// covered engrams while the gap re-embeds. Use this for partial-coverage
+// remediation; StartReembedVault remains the model-migration full rebuild.
+func (e *Engine) StartReembedMissing(ctx context.Context, vaultName string) (*vaultjob.Job, error) {
+	if !e.beginVaultOp() {
+		return nil, fmt.Errorf("engine is shutting down")
+	}
+	defer e.endVaultOp()
+
+	mu := e.getVaultMutex(vaultName)
+	if !mu.TryLock() {
+		return nil, fmt.Errorf("vault %q: another operation is in progress", vaultName)
+	}
+	defer mu.Unlock()
+
+	names, err := e.store.ListVaultNames()
+	if err != nil {
+		return nil, fmt.Errorf("reembed-missing: list vault names: %w", err)
+	}
+	found := false
+	for _, n := range names {
+		if n == vaultName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("vault %q: %w", vaultName, ErrVaultNotFound)
+	}
+
+	ws := e.store.VaultPrefix(vaultName)
+
+	job, err := e.jobManager.Create("reembed-missing", vaultName, vaultName)
+	if err != nil {
+		return nil, fmt.Errorf("reembed-missing: create job: %w", err)
+	}
+	job.CopyTotal = e.store.GetVaultCount(ctx, ws) // scan upper bound
+	job.IndexTotal = 0
+
+	if !e.spawnJob(func() { e.runReembedMissing(job, ws, vaultName) }) {
+		e.jobManager.Fail(job, fmt.Errorf("engine is shutting down"))
+		return job, nil
+	}
+	return job, nil
+}
+
+func (e *Engine) runReembedMissing(job *vaultjob.Job, ws [8]byte, vaultName string) {
+	ctx := e.stopCtx
+
+	defer func() {
+		if r := recover(); r != nil {
+			if storage.IsClosedPanic(r) {
+				e.jobManager.Fail(job, fmt.Errorf("engine closed during job"))
+				return
+			}
+			e.jobManager.Fail(job, fmt.Errorf("reembed-missing job panicked: %v", r))
+			slog.Error("reembed-missing job panicked", "job_id", job.ID, "vault", vaultName, "panic", r)
+		}
+	}()
+
+	cleared, err := e.store.ClearEmbedFlagsForMissing(ctx, ws)
+	if err != nil {
+		e.jobManager.Fail(job, fmt.Errorf("clear embed flags (missing): %w", err))
+		return
+	}
+	job.CopyCurrent.Store(cleared)
+
+	// Wake the RetroactiveProcessor to backfill the cleared engrams.
+	if fn, ok := e.onWrite.Load().(func()); ok && fn != nil {
+		fn()
+	}
+
+	slog.Info("reembed-missing: flags cleared for unembedded engrams; RetroactiveProcessor will backfill",
+		"vault", vaultName, "flags_cleared", cleared)
+	e.jobManager.Complete(job)
+}

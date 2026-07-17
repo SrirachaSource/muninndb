@@ -168,3 +168,65 @@ func (ps *PebbleStore) SetEmbedModel(ws [8]byte, model string) error {
 	}
 	return ps.db.Set(key, []byte(model), pebble.Sync)
 }
+
+// ClearEmbedFlagsForMissing clears the embed digest flags (done + failed) for
+// ONLY those engrams in the vault that have no embedding (EmbedDim == 0), so
+// the RetroactiveProcessor re-embeds exactly the coverage gap. Unlike
+// ClearEmbedFlagsForVault it touches no existing vectors, no HNSW state, and
+// no model marker — vaults with 90%+ coverage keep full semantic recall while
+// the gap backfills. Motivation (2026-07-17): 2,190 engrams floor-wide carried
+// DigestEmbedFailed from embedder-outage eras and were never retried; the only
+// existing remedy would have dropped every healthy vector in the vault.
+func (ps *PebbleStore) ClearEmbedFlagsForMissing(ctx context.Context, ws [8]byte) (int64, error) {
+	const DigestEmbed uint8 = 0x02
+	const DigestEmbedFailed uint8 = 0x80
+	const embedMask uint8 = DigestEmbed | DigestEmbedFailed
+
+	var cleared int64
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+
+	scanErr := ps.ScanEngrams(ctx, ws, func(eng *Engram) error {
+		if eng.EmbedDim != 0 {
+			return nil
+		}
+		id := [16]byte(eng.ID)
+
+		raw, err := ps.getDigestFlagsRaw(id)
+		noRecord := errors.Is(err, pebble.ErrNotFound)
+		if err != nil && !noRecord {
+			return fmt.Errorf("get digest: %w", err)
+		}
+		if noRecord {
+			raw = 0
+		}
+		// Same rule as ClearEmbedFlagsForVault: an existing record with both
+		// flags clear needs nothing; a MISSING record must be written as zero
+		// so the processor explicitly sees the engram as pending.
+		if !noRecord && raw&embedMask == 0 {
+			return nil
+		}
+
+		raw &^= embedMask
+		if err := batch.Set(keys.DigestFlagsKey(id), []byte{raw}, nil); err != nil {
+			return fmt.Errorf("batch set: %w", err)
+		}
+		cleared++
+		if cleared%1000 == 0 {
+			if err := batch.Commit(pebble.NoSync); err != nil {
+				return fmt.Errorf("commit batch: %w", err)
+			}
+			batch.Close()
+			batch = ps.db.NewBatch()
+		}
+		return nil
+	})
+	if scanErr != nil {
+		return cleared, fmt.Errorf("clear embed flags (missing): %w", scanErr)
+	}
+
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return cleared, fmt.Errorf("clear embed flags (missing): final commit: %w", err)
+	}
+	return cleared, nil
+}

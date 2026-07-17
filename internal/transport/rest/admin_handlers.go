@@ -1056,6 +1056,34 @@ func (s *Server) handleReembedVault(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
 }
 
+// handleReembedMissingVault backfills embeddings for ONLY the engrams that
+// have none (EmbedDim == 0). POST /api/admin/vaults/{name}/reembed-missing.
+// Existing vectors and the HNSW index are untouched.
+func (s *Server) handleReembedMissingVault(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+	job, err := s.engine.StartReembedMissing(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.EmitAudit(r, "vault.reembed_missing", "vault", name, "ok", nil)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
+}
+
 // handleExportVaultMarkdown exports a vault as a markdown .tgz archive.
 // GET /api/admin/vaults/{name}/export-markdown
 // Response: application/gzip stream with Content-Disposition attachment.

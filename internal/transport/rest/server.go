@@ -607,9 +607,12 @@ func (s *Server) bodySizeMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// withLargeBody replaces the body size limit with 512 MB for bulk import operations.
+// withLargeBody replaces the body size limit with 2 GB for bulk import
+// operations. 512 MB proved too small in production: the trading vault's own
+// export reached 620 MB (2026-07-17), which made every vault un-reimportable
+// from its own backup — the cap must comfortably exceed the largest real vault.
 func (s *Server) withLargeBody(next http.HandlerFunc) http.HandlerFunc {
-	const maxBody = 512 << 20 // 512 MB
+	const maxBody = 2 << 30 // 2 GB
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		next(w, r)

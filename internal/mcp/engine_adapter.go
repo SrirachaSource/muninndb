@@ -152,10 +152,12 @@ func (a *mcpEngineAdapter) Explain(ctx context.Context, vault string, req *Expla
 		return nil, err
 	}
 	return &ExplainResult{
-		EngramID:    data.EngramID,
-		WouldReturn: data.WouldReturn,
-		Threshold:   data.Threshold,
-		FinalScore:  data.FinalScore,
+		EngramID:     data.EngramID,
+		Concept:      data.Concept,
+		InCandidates: data.InCandidates,
+		WouldReturn:  data.WouldReturn,
+		Threshold:    data.Threshold,
+		FinalScore:   data.FinalScore,
 		Components: ExplainComponents{
 			FullTextRelevance:  float64(data.Components.FullTextRelevance),
 			SemanticSimilarity: float64(data.Components.SemanticSimilarity),

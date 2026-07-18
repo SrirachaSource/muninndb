@@ -196,6 +196,14 @@ func (m *mockEngine) CountEmbedded(ctx context.Context) int64 {
 	return 0
 }
 
+func (m *mockEngine) VectorStatus(ctx context.Context, vault, engramID string, probe bool, probeK int) (*engine.VectorStatusData, error) {
+	return &engine.VectorStatusData{EngramID: engramID, Vault: vault}, nil
+}
+
+func (m *mockEngine) VaultVectorAudit(ctx context.Context, vault string, sampleCap int) (*engine.VaultVectorAuditData, error) {
+	return &engine.VaultVectorAuditData{Vault: vault, SampleCap: sampleCap}, nil
+}
+
 func (m *mockEngine) Observability(ctx context.Context, version string, uptimeSeconds int64) (*engine.ObservabilitySnapshot, error) {
 	return &engine.ObservabilitySnapshot{}, nil
 }

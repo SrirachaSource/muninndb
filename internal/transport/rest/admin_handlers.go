@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -1082,6 +1083,146 @@ func (s *Server) handleReembedMissingVault(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
+}
+
+// VectorStatusResponse is the wire shape of GET
+// /api/admin/vaults/{name}/engrams/{id}/vector-status.
+type VectorStatusResponse struct {
+	EngramID            string               `json:"engram_id"`
+	Vault               string               `json:"vault"`
+	Concept             string               `json:"concept"`
+	FlagsRaw            uint8                `json:"flags_raw"`
+	FlagEmbedded        bool                 `json:"flag_embedded"`
+	FlagFailed0x80      bool                 `json:"flag_failed_0x80"`
+	EmbedDimLabelRaw    uint8                `json:"embed_dim_label_raw"`
+	EmbedDimLabel       string               `json:"embed_dim_label"`
+	EmbeddingRowPresent bool                 `json:"embedding_row_present"`
+	EmbeddingRowBytes   int                  `json:"embedding_row_bytes"`
+	HNSWVectorPresent   bool                 `json:"hnsw_vector_present"`
+	HNSWVectorDim       int                  `json:"hnsw_vector_dim"`
+	GraphInMemory       bool                 `json:"graph_in_memory"`
+	GraphTombstoned     bool                 `json:"graph_tombstoned"`
+	GraphEdgesPerLayer  []int                `json:"graph_edges_per_layer,omitempty"`
+	VaultVectors        int                  `json:"vault_vectors"`
+	SemanticSearchable  bool                 `json:"semantic_searchable"`
+	Probe               *VectorProbeResponse `json:"probe,omitempty"`
+}
+
+// VectorProbeResponse reports the optional k-NN self-probe (?probe=1).
+type VectorProbeResponse struct {
+	Found bool `json:"found"`
+	Rank  int  `json:"rank"`
+	K     int  `json:"k"`
+}
+
+// handleVectorStatus reads every embedding-related store for one engram side
+// by side. GET /api/admin/vaults/{name}/engrams/{id}/vector-status[?probe=1&k=N]
+// Read-only — safe to point at a live defect specimen.
+func (s *Server) handleVectorStatus(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" || !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid vault name")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	probe := r.URL.Query().Get("probe") == "1" || r.URL.Query().Get("probe") == "true"
+	probeK := 0
+	if kStr := r.URL.Query().Get("k"); kStr != "" {
+		if k, err := strconv.Atoi(kStr); err == nil && k > 0 {
+			probeK = k
+		}
+	}
+
+	data, err := s.engine.VectorStatus(r.Context(), name, id, probe, probeK)
+	if err != nil {
+		switch {
+		case errors.Is(err, engine.ErrEngramNotFound):
+			s.sendError(r, w, http.StatusNotFound, ErrEngramNotFound, err.Error())
+		case strings.Contains(err.Error(), "parse id"):
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
+		default:
+			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		}
+		return
+	}
+
+	resp := VectorStatusResponse{
+		EngramID:            data.EngramID,
+		Vault:               data.Vault,
+		Concept:             data.Concept,
+		FlagsRaw:            data.FlagsRaw,
+		FlagEmbedded:        data.FlagEmbedded,
+		FlagFailed0x80:      data.FlagFailed0x80,
+		EmbedDimLabelRaw:    data.LabelRaw,
+		EmbedDimLabel:       data.LabelName,
+		EmbeddingRowPresent: data.RowPresent,
+		EmbeddingRowBytes:   data.RowBytes,
+		HNSWVectorPresent:   data.VecSlotPresent,
+		HNSWVectorDim:       data.VecSlotDim,
+		GraphInMemory:       data.GraphInMemory,
+		GraphTombstoned:     data.GraphTombstoned,
+		GraphEdgesPerLayer:  data.GraphEdges,
+		VaultVectors:        data.VaultVectors,
+		SemanticSearchable:  data.GraphInMemory && !data.GraphTombstoned,
+	}
+	if data.ProbeRequested {
+		resp.Probe = &VectorProbeResponse{Found: data.ProbeFound, Rank: data.ProbeRank, K: probeK}
+	}
+	s.EmitAudit(r, "vault.vector_status", "engram", data.EngramID, "ok", nil)
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+// VaultVectorAuditResponse is the wire shape of GET
+// /api/admin/vaults/{name}/vector-audit.
+type VaultVectorAuditResponse struct {
+	Vault         string   `json:"vault"`
+	Total         int      `json:"total"`
+	LabelEmbedded int      `json:"label_embedded"`
+	Rows          int      `json:"embedding_rows"`
+	GraphNodes    int      `json:"graph_nodes"`
+	LabelNoRow    []string `json:"label_no_row"`
+	RowNoGraph    []string `json:"row_no_graph"`
+	Failed0x80    []string `json:"failed_0x80"`
+	SampleCap     int      `json:"sample_cap"`
+	Truncated     bool     `json:"truncated"`
+}
+
+// handleVaultVectorAudit cross-checks label/row/graph agreement across a vault.
+// GET /api/admin/vaults/{name}/vector-audit[?cap=N]  — read-only scan.
+func (s *Server) handleVaultVectorAudit(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" || !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid vault name")
+		return
+	}
+	sampleCap := 0
+	if capStr := r.URL.Query().Get("cap"); capStr != "" {
+		if n, err := strconv.Atoi(capStr); err == nil && n > 0 {
+			sampleCap = n
+		}
+	}
+	data, err := s.engine.VaultVectorAudit(r.Context(), name, sampleCap)
+	if err != nil {
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.EmitAudit(r, "vault.vector_audit", "vault", name, "ok", nil)
+	s.sendJSON(w, http.StatusOK, VaultVectorAuditResponse{
+		Vault:         data.Vault,
+		Total:         data.Total,
+		LabelEmbedded: data.LabelEmbedded,
+		Rows:          data.Rows,
+		GraphNodes:    data.GraphNodes,
+		LabelNoRow:    data.LabelNoRow,
+		RowNoGraph:    data.RowNoGraph,
+		Failed0x80:    data.Failed0x80,
+		SampleCap:     data.SampleCap,
+		Truncated:     data.Truncated,
+	})
 }
 
 // handleReweightLinks sets weights on EXISTING associations (curator repair).

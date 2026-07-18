@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -31,8 +32,13 @@ type ExplainData struct {
 	Concept     string
 	FinalScore  float64
 	WouldReturn bool
-	Threshold   float64
-	Components  mbp.ScoreComponents
+	// InCandidates distinguishes "scored low" from "never surfaced": false
+	// means the engram did not appear in this query's activation candidates at
+	// all, so FinalScore/Components are structurally zero — not a computed
+	// score. The engram itself is guaranteed to exist (lookup errors loud).
+	InCandidates bool
+	Threshold    float64
+	Components   mbp.ScoreComponents
 }
 
 // GetAssociations returns the forward associations for a single engram by string ID.
@@ -189,8 +195,30 @@ func (e *Engine) Traverse(ctx context.Context, vault, startID string, maxHops, m
 }
 
 // Explain runs activation with the given query and returns score details for engramID.
+// The target is looked up FIRST: a malformed ID or a missing engram errors loud
+// (parity with Read) instead of falling through to an all-zeros result. A zero
+// result with InCandidates=false therefore always means "the engram exists but
+// did not surface for this query" — never a lookup failure in disguise.
 func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []string, embedding []float32) (*ExplainData, error) {
-	const threshold = 0.0
+	// Epsilon, not 0.0: activateCore silently promotes a zero threshold to the
+	// 0.1 recall default, which filters out the low-scoring candidates explain
+	// exists to expose.
+	const threshold = 1e-9
+
+	id, err := storage.ParseULID(engramID)
+	if err != nil {
+		return nil, fmt.Errorf("explain: parse id: %w", err)
+	}
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
+	eng, err := e.store.GetEngram(ctx, wsPrefix, id)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, ErrEngramNotFound
+		}
+		return nil, fmt.Errorf("explain: get engram: %w", err)
+	}
+	canonicalID := id.String()
+
 	// Run activation in observe mode so we get accurate scores without
 	// triggering Hebbian co-activation, activity tracking, or PAS transitions.
 	// Explain is a diagnostic read — it should not mutate cognitive state.
@@ -206,12 +234,14 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 		return nil, fmt.Errorf("explain activation: %w", err)
 	}
 	result := &ExplainData{
-		EngramID:    engramID,
+		EngramID:    canonicalID,
+		Concept:     eng.Concept,
 		WouldReturn: false,
 		Threshold:   threshold,
 	}
 	for _, item := range resp.Activations {
-		if item.ID == engramID {
+		if item.ID == canonicalID {
+			result.InCandidates = true
 			result.WouldReturn = true
 			result.FinalScore = float64(item.Score)
 			result.Concept = item.Concept

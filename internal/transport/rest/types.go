@@ -155,6 +155,13 @@ type EngineAPI interface {
 	// EmbedStats returns the current stats for the embed retroactive processor.
 	// Returns a zero-value RetroactiveStats when no embed processor is registered.
 	EmbedStats() plugin.RetroactiveStats
+	// VectorStatus reads every embedding-related store for one engram side by
+	// side (flags, label, 0x18 row, HNSW vector slot, live graph membership,
+	// optional self-probe). Read-only diagnostic — never repairs.
+	VectorStatus(ctx context.Context, vault, engramID string, probe bool, probeK int) (*engine.VectorStatusData, error)
+	// VaultVectorAudit cross-checks label/row/graph agreement across a vault
+	// and samples divergent IDs. Read-only.
+	VaultVectorAudit(ctx context.Context, vault string, sampleCap int) (*engine.VaultVectorAuditData, error)
 }
 
 // ── Web UI types ─────────────────────────────────────────────────────────
@@ -376,14 +383,17 @@ type ExplainComponents struct {
 
 // ExplainResponse is returned by the explain endpoint.
 type ExplainResponse struct {
-	EngramID    string            `json:"engram_id"`
-	Concept     string            `json:"concept"`
-	FinalScore  float64           `json:"final_score"`
-	Components  ExplainComponents `json:"components"`
-	FTSMatches  []string          `json:"fts_matches"`
-	AssocPath   []string          `json:"assoc_path"`
-	WouldReturn bool              `json:"would_return"`
-	Threshold   float64           `json:"threshold"`
+	EngramID   string            `json:"engram_id"`
+	Concept    string            `json:"concept"`
+	FinalScore float64           `json:"final_score"`
+	Components ExplainComponents `json:"components"`
+	FTSMatches []string          `json:"fts_matches"`
+	AssocPath  []string          `json:"assoc_path"`
+	// InCandidates=false means the engram exists but never surfaced for this
+	// query; zero components are structural, not scores.
+	InCandidates bool    `json:"in_candidates"`
+	WouldReturn  bool    `json:"would_return"`
+	Threshold    float64 `json:"threshold"`
 }
 
 // SetStateRequest is the body for PUT /api/engrams/{id}/state.

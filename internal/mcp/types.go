@@ -218,14 +218,18 @@ type ExplainComponents struct {
 
 // ExplainResult breaks down why an engram scored as it did for a given query.
 type ExplainResult struct {
-	EngramID    string            `json:"engram_id"`
-	Concept     string            `json:"concept"`
-	FinalScore  float64           `json:"final_score"`
-	Components  ExplainComponents `json:"components"`
-	FTSMatches  []string          `json:"fts_matches"`
-	AssocPath   []string          `json:"assoc_path"`
-	WouldReturn bool              `json:"would_return"`
-	Threshold   float64           `json:"threshold"`
+	EngramID   string            `json:"engram_id"`
+	Concept    string            `json:"concept"`
+	FinalScore float64           `json:"final_score"`
+	Components ExplainComponents `json:"components"`
+	FTSMatches []string          `json:"fts_matches"`
+	AssocPath  []string          `json:"assoc_path"`
+	// InCandidates=false means the engram exists but never surfaced in this
+	// query's activation candidates — the zero components are structural, not
+	// scores. (Lookup failures error loud and never reach this struct.)
+	InCandidates bool    `json:"in_candidates"`
+	WouldReturn  bool    `json:"would_return"`
+	Threshold    float64 `json:"threshold"`
 }
 
 // DeletedEngram is a summary of a soft-deleted engram still within the recovery window.

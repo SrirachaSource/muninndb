@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -21,30 +22,25 @@ func TestEngineGetContradictions_Empty(t *testing.T) {
 	}
 }
 
-// TestEngineExplain_UnknownID verifies that Explain with an unknown engram ID
-// returns a valid ExplainData (WouldReturn=false) rather than panicking or
-// returning an error. The method is defined to return descriptive data, not an
-// error, when an engram simply doesn't appear in activation results.
+// TestEngineExplain_UnknownID verifies that Explain fails LOUD on lookup
+// failures instead of returning an all-zeros result: a malformed ID errors at
+// parse, and a well-formed ID that was never written returns ErrEngramNotFound.
+// (The old contract — silent zeros for any miss — made a lookup failure
+// indistinguishable from a genuine zero score.)
 func TestEngineExplain_UnknownID(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	// Use an ID that was never written to the vault.
-	unknownID := "01HNKZ5F0000000000000000"
+	// Malformed (24 chars — a ULID is 26): must error at parse, like Read.
+	if _, err := eng.Explain(ctx, "test-vault", "01HNKZ5F0000000000000000", []string{"anything"}, nil); err == nil {
+		t.Fatal("Explain with malformed ID returned nil error, expected parse error")
+	}
 
-	data, err := eng.Explain(ctx, "test-vault", unknownID, []string{"anything"}, nil)
-	if err != nil {
-		t.Fatalf("Explain with unknown ID returned unexpected error: %v", err)
-	}
-	if data == nil {
-		t.Fatal("Explain returned nil ExplainData, expected non-nil struct")
-	}
-	if data.EngramID != unknownID {
-		t.Errorf("ExplainData.EngramID = %q, want %q", data.EngramID, unknownID)
-	}
-	if data.WouldReturn {
-		t.Errorf("WouldReturn = true for an engram that was never written; expected false")
+	// Well-formed but never written: must return ErrEngramNotFound.
+	_, err := eng.Explain(ctx, "test-vault", "01HNKZ5F00000000000000000A", []string{"anything"}, nil)
+	if !errors.Is(err, ErrEngramNotFound) {
+		t.Fatalf("Explain with unknown ID: got err=%v, want ErrEngramNotFound", err)
 	}
 }
 

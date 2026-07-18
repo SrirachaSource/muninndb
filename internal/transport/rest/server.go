@@ -258,6 +258,8 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-fts", s.withAdminMiddleware(s.handleReindexFTSVault))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed", s.withAdminMiddleware(s.handleReembedVault))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed-missing", s.withAdminMiddleware(s.handleReembedMissingVault))
+	mux.HandleFunc("GET /api/admin/vaults/{name}/engrams/{id}/vector-status", s.withAdminMiddleware(s.handleVectorStatus))
+	mux.HandleFunc("GET /api/admin/vaults/{name}/vector-audit", s.withAdminMiddleware(s.handleVaultVectorAudit))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reweight-links", s.withAdminMiddleware(s.handleReweightLinks))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/restore-link-weights", s.withAdminMiddleware(s.handleRestoreLinkWeights))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/rename", s.withAdminMiddleware(s.handleRenameVault))
@@ -1607,7 +1609,14 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.engine.Explain(r.Context(), vault, &body)
 	if err != nil {
-		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		switch {
+		case errors.Is(err, engine.ErrEngramNotFound):
+			s.sendError(r, w, http.StatusNotFound, ErrEngramNotFound, err.Error())
+		case strings.Contains(err.Error(), "parse id"):
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
+		default:
+			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		}
 		return
 	}
 	s.sendJSON(w, http.StatusOK, resp)

@@ -261,6 +261,14 @@ func (w *RESTEngineWrapper) CountEmbedded(ctx context.Context) int64 {
 	return w.engine.CountEmbedded(ctx)
 }
 
+func (w *RESTEngineWrapper) VectorStatus(ctx context.Context, vault, engramID string, probe bool, probeK int) (*engine.VectorStatusData, error) {
+	return w.engine.VectorStatus(ctx, vault, engramID, probe, probeK)
+}
+
+func (w *RESTEngineWrapper) VaultVectorAudit(ctx context.Context, vault string, sampleCap int) (*engine.VaultVectorAuditData, error) {
+	return w.engine.VaultVectorAudit(ctx, vault, sampleCap)
+}
+
 func (w *RESTEngineWrapper) RecordAccess(ctx context.Context, vault, id string) error {
 	return w.engine.RecordAccess(ctx, vault, id)
 }
@@ -423,11 +431,19 @@ func (w *RESTEngineWrapper) Explain(ctx context.Context, vault string, req *Expl
 		return nil, err
 	}
 	return &ExplainResponse{
-		EngramID:    data.EngramID,
-		Concept:     data.Concept,
-		FinalScore:  data.FinalScore,
-		WouldReturn: data.WouldReturn,
-		Threshold:   data.Threshold,
+		EngramID:     data.EngramID,
+		Concept:      data.Concept,
+		FinalScore:   data.FinalScore,
+		InCandidates: data.InCandidates,
+		WouldReturn:  data.WouldReturn,
+		Threshold:    data.Threshold,
+		Components: ExplainComponents{
+			FullTextRelevance:  float64(data.Components.FullTextRelevance),
+			SemanticSimilarity: float64(data.Components.SemanticSimilarity),
+			DecayFactor:        float64(data.Components.DecayFactor),
+			HebbianBoost:       float64(data.Components.HebbianBoost),
+			AccessFrequency:    float64(data.Components.AccessFrequency),
+		},
 	}, nil
 }
 

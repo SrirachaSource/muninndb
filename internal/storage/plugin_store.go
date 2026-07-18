@@ -199,6 +199,23 @@ func (ps *PebbleStore) UpdateEmbedding(ctx context.Context, wsPrefix [8]byte, id
 	return nil
 }
 
+// EmbeddingRowLen reports whether the 0x18 quantized-embedding row exists for
+// an engram and how many bytes it holds. present=false means no row (the
+// honest "never embedded / row dropped" signal — the EmbedDim label can claim
+// otherwise). Read-only.
+func (ps *PebbleStore) EmbeddingRowLen(ctx context.Context, wsPrefix [8]byte, id ULID) (length int, present bool, err error) {
+	val, closer, err := ps.db.Get(keys.EmbeddingKey(wsPrefix, [16]byte(id)))
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("EmbeddingRowLen: %w", err)
+	}
+	length = len(val)
+	closer.Close()
+	return length, true, nil
+}
+
 // FindVaultPrefix scans the 0x01 key space to find the vault prefix for an engram ID.
 // Returns the first matching vault prefix, or zero if not found.
 func (ps *PebbleStore) FindVaultPrefix(id ULID) ([8]byte, bool) {

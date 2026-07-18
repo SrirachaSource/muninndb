@@ -2769,6 +2769,27 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	if err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: read old reverse associations: %w", err)
 	}
+
+	// Read the old engram's ENTITY graph before any writes, for the same reason
+	// as the associations above: entity links and entity-relationship records
+	// are keyed by engram id, so without migration every caller-set entity stays
+	// bound to the id being soft-deleted and the evolved engram silently loses
+	// its place in the entity graph (orphaned edges; boot-anchor loss on spine
+	// engrams). Reads fail loud — a half-read graph must not migrate.
+	var oldEntityNames []string
+	if err := e.store.ScanEngramEntities(ctx, wsPrefix, oldULID, func(name string) error {
+		oldEntityNames = append(oldEntityNames, name)
+		return nil
+	}); err != nil {
+		return storage.ULID{}, fmt.Errorf("evolve: read old entities: %w", err)
+	}
+	var oldEntityRels []storage.RelationshipRecord
+	if err := e.store.ScanEngramRelationships(ctx, wsPrefix, oldULID, func(rec storage.RelationshipRecord) error {
+		oldEntityRels = append(oldEntityRels, rec)
+		return nil
+	}); err != nil {
+		return storage.ULID{}, fmt.Errorf("evolve: read old entity relationships: %w", err)
+	}
 	// Never truncate a graph silently: a dropped edge is indistinguishable from
 	// an edge that never existed.
 	if len(oldFwd[oldULID]) >= evolveMaxAssocMigration || len(oldRev) >= evolveMaxAssocMigration {
@@ -2884,6 +2905,39 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	// Persist vault name (idempotent).
 	if err := e.store.WriteVaultName(wsPrefix, vault); err != nil {
 		slog.Warn("engine: failed to persist vault name", "vault", vault, "err", err)
+	}
+
+	// Migrate the entity graph onto the new version — additive, like the
+	// association migration above: the old engram keeps its own links so a
+	// soft-deleted engram stays restorable with its entity graph intact.
+	// Relationship records are copied WHOLESALE (weight/source preserved).
+	// These writes are post-commit (the entity store has no batch API), so
+	// failures warn rather than abort — the evolve itself already stands.
+	migratedEntities := 0
+	for _, name := range oldEntityNames {
+		if err := e.store.WriteEntityEngramLink(ctx, wsPrefix, newULID, name); err != nil {
+			slog.Warn("engine: evolve: failed to migrate entity link", "id", newULID.String(), "entity", name, "err", err)
+			continue
+		}
+		migratedEntities++
+	}
+	for _, rec := range oldEntityRels {
+		if err := e.store.UpsertRelationshipRecord(ctx, wsPrefix, newULID, rec); err != nil {
+			slog.Warn("engine: evolve: failed to migrate entity relationship", "id", newULID.String(), "from", rec.FromEntity, "to", rec.ToEntity, "err", err)
+		}
+	}
+	// Carry the entity digest flags so the retroactive enricher does not
+	// re-derive entities over the migrated (often caller-set) ones. Only the
+	// bits the old engram actually had, and only when something migrated.
+	if migratedEntities > 0 || len(oldEntityRels) > 0 {
+		oldFlags, _ := e.store.GetDigestFlags(ctx, plugin.ULID(oldULID))
+		carry := oldFlags & (plugin.DigestEntities | plugin.DigestRelationships)
+		if carry != 0 {
+			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(newULID))
+			if err := e.store.SetDigestFlag(ctx, newULID, existing|carry); err != nil {
+				slog.Warn("engine: evolve: failed to carry entity digest flags", "id", newULID.String(), "err", err)
+			}
+		}
 	}
 
 	// When the caller provided an embedding, mark DigestEmbed and insert into

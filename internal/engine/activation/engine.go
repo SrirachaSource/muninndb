@@ -1251,7 +1251,7 @@ func (e *ActivationEngine) phase6Score(
 			// Populate ScoreComponents for observability: report the individual
 			// signal scores so callers can understand the composition even though
 			// the final score is rank-based.
-			normalizedFTS := math.Tanh(c.ftsScore)
+			normalizedFTS := normalizeFTS(c.ftsScore)
 			scored = append(scored, scoredItem{
 				id:    c.id,
 				final: final,
@@ -1468,6 +1468,22 @@ cgdnDone:
 	}, nil
 }
 
+// normalizeFTS maps an unbounded accumulated BM25 score into [0, 1] so it is
+// commensurate with cosine similarity in the ContentMatch gate. The rational
+// curve x/(x+2) replaces tanh, which saturated so fast (tanh(2)≈0.96,
+// tanh(3)≈0.995) that any lexical match scored ≈1.0 and quality differences
+// vanished from the blend. x/(x+2) keeps resolution across the useful BM25
+// range (2→0.50, 6→0.75, 15→0.88) and preserves relative ordering.
+func normalizeFTS(fts float64) float64 {
+	if fts <= 0 || math.IsNaN(fts) {
+		return 0
+	}
+	if math.IsInf(fts, 1) {
+		return 1
+	}
+	return fts / (fts + 2.0)
+}
+
 // computeComponents calculates all scoring components for a candidate engram.
 // Accepts *storage.Engram directly — avoids a separate GetMetadata call in phase6.
 // lastAccessNs is the nanosecond timestamp of last cache access (0 if not cached).
@@ -1492,11 +1508,7 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 
 	decayFactor := math.Max(0.05, math.Exp(-daysSince/float64(eng.Stability)))
 
-	// Normalize BM25 score from [0, +∞) to [0, 1) using tanh.
-	// Raw BM25 is unbounded and not comparable to cosine similarity [0,1].
-	// tanh(0)=0, tanh(1)≈0.76, tanh(3)≈0.995 — preserves relative ordering,
-	// prevents high BM25 scores from saturating the composite score via clamping.
-	normalizedFTS := math.Tanh(ftsScore)
+	normalizedFTS := normalizeFTS(ftsScore)
 
 	raw := w.SemanticSimilarity*vectorScore +
 		w.FullTextRelevance*normalizedFTS +
@@ -1583,7 +1595,7 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	lastAccessNs int64, now time.Time, w resolvedWeights) ScoreComponents {
 
 	// Compute content relevance (same as standard path).
-	normalizedFTS := math.Tanh(ftsScore)
+	normalizedFTS := normalizeFTS(ftsScore)
 	contentMatch := w.SemanticSimilarity*vectorScore + w.FullTextRelevance*normalizedFTS
 
 	// Compute ACT-R base-level activation B(M).

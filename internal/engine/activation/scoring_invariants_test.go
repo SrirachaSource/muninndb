@@ -133,11 +133,11 @@ func TestScoringInvariant_NormalizedFTSBounded(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			normalized := math.Tanh(tc.ftsScore)
+			normalized := normalizeFTS(tc.ftsScore)
 			if math.IsNaN(normalized) {
-				t.Fatalf("tanh(%v) = NaN", tc.ftsScore)
+				t.Fatalf("normalizeFTS(%v) = NaN", tc.ftsScore)
 			}
-			// tanh(x) for x >= 0 is in [0, 1); tanh(+Inf) = 1.0 exactly (limit)
+			// normalizeFTS(x) for x >= 0 is in [0, 1); +Inf maps to 1.0 exactly (limit)
 			if normalized < 0.0 {
 				t.Errorf("normalizedFTS = %v, want >= 0.0 (ftsScore=%v)", normalized, tc.ftsScore)
 			}

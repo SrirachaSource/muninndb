@@ -1878,8 +1878,8 @@ func TestComputeComponents_FTSNormalization(t *testing.T) {
 		t.Errorf("higher FTS score should yield higher normalized value: 0.5→%v, 5.0→%v",
 			c1.FullTextRelevance, c2.FullTextRelevance)
 	}
-	// tanh saturates, so 5.0 and 50.0 should be very close
-	if c3.FullTextRelevance < 0.99 {
+	// x/(x+2) approaches 1 asymptotically: 50 → 50/52 ≈ 0.962.
+	if c3.FullTextRelevance < 0.95 {
 		t.Errorf("very high FTS should saturate near 1.0, got %v", c3.FullTextRelevance)
 	}
 }

@@ -14,6 +14,15 @@ const (
 	// (~0.3–0.9) so the boost surfaces related content without dominating.
 	entityBoostFactor = float64(0.15)
 
+	// entityBoostCap bounds the TOTAL entity boost one engram can accumulate
+	// across all seeds and shared entities. Uncapped accumulation let
+	// entity-dense engrams (e.g. working-memory fragments that namedrop dozens
+	// of entities) pile up 15-22 increments (scores 2.2-3.3) and outrank
+	// honestly-scored content (ACT-R composites ≤ ~1.5), defeating the
+	// "without dominating" intent above. The cap runs after every fusion path,
+	// so it is the only bound that reaches RRF results too.
+	entityBoostCap = 2 * entityBoostFactor
+
 	// entityBoostTopN is the number of top BFS results whose entity links are
 	// used as seeds for the spread-activation pass.
 	entityBoostTopN = 5
@@ -25,7 +34,8 @@ const (
 // finds all other engrams in the same vault that mention those entities via
 // the 0x23 reverse index. Each such engram receives a score boost of
 // entityBoostFactor (or is added to the result set with that score if it was
-// not already returned by BFS). Results are re-sorted by score descending.
+// not already returned by BFS), with the total per-engram boost capped at
+// entityBoostCap. Results are re-sorted by score descending.
 func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []activation.ScoredEngram) []activation.ScoredEngram {
 	if len(results) == 0 {
 		return results
@@ -44,6 +54,9 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []act
 		seenInResults[r.Engram.ID] = i
 	}
 
+	// Total boost applied per engram, enforced against entityBoostCap.
+	applied := make(map[storage.ULID]float64)
+
 	// For each seed engram, iterate its entity links (0x20 forward index).
 	for _, topEng := range seeds {
 		_ = e.store.ScanEngramEntities(ctx, ws, topEng.Engram.ID, func(entityName string) error {
@@ -57,6 +70,9 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []act
 					return nil
 				}
 
+				if applied[engramID] >= entityBoostCap {
+					return nil // per-engram boost budget exhausted
+				}
 				if idx, found := seenInResults[engramID]; found {
 					// Boost existing result.
 					results[idx].Score += entityBoostFactor
@@ -75,6 +91,7 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []act
 					})
 					seenInResults[engramID] = len(results) - 1
 				}
+				applied[engramID] += entityBoostFactor
 				return nil
 			})
 		})

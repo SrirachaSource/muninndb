@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Recall ranking: post-BFS entity-boost accumulation is now capped at 2× the per-hit factor (0.30) per engram. Uncapped accumulation let entity-dense engrams (e.g. imported working-memory fragments sharing 15–22 entities with the top seeds) pile up boost-only scores of 2.2–3.3 and outrank content-scored results (composites ≤ ~1.5) in every fusion mode, since the boost pass runs after fusion.
+- Vault `scoring_fusion` config now applies to recalls that carry explicit weights — which is how every mode preset (semantic/recent/deep) arrives. Previously the knob was silently ignored unless the request omitted weights entirely.
+
+### Changed
+- FTS normalization in the ContentMatch gate switched from `tanh` to the rational curve `x/(x+2)`. tanh saturated so quickly (tanh(3)≈0.995) that all lexical matches looked equally strong in the blend; the new curve preserves lexical-quality resolution while staying commensurate with cosine similarity. Weak lexical-only matches now score lower and may fall below recall thresholds (intended noise reduction).
+
 ---
 
 ## [0.4.10] - 2026-04-02

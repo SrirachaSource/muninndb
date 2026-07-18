@@ -699,7 +699,7 @@ func TestZeroFTSScoreYearsZeroFTRComponent(t *testing.T) {
 	}
 	store.writeEngram(eng1)
 
-	// FTS score = 0.0 → after math.Tanh normalization → 0.0.
+	// FTS score = 0.0 → after normalizeFTS normalization → 0.0.
 	fts := &stubFTS{results: []activation.ScoredID{
 		{ID: eng1.ID, Score: 0.0},
 	}}
@@ -940,9 +940,12 @@ func TestDisableACTR_LegacyScoringPath(t *testing.T) {
 	eng := newTestEngine(store, fts, nil)
 
 	// Run with DisableACTR=true — should use legacy weighted-sum path, not ACT-R.
+	// Threshold must be explicit and small: Run() promotes Threshold <= 0 to the
+	// 0.05 default, which is above this fixture's weak-lexical composite
+	// (0.2 × normalizeFTS(0.6) × 0.9 ≈ 0.042).
 	result, err := eng.Run(context.Background(), &activation.ActivateRequest{
 		Context:    []string{"test content"},
-		Threshold:  0.0,
+		Threshold:  0.01,
 		MaxResults: 10,
 		Weights: &activation.Weights{
 			SemanticSimilarity: 0.8,

@@ -1911,16 +1911,22 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			ACTRDecay:    actrDecay,
 			ACTRHebScale: actrHebScale,
 		}
+	}
 
-		// Wire ScoringFusion from plasticity config to activation weights.
-		if resolved.ScoringFusion == "rrf" {
-			actReq.Weights.UseRRFFusion = true
-			actReq.Weights.DisableACTR = true
-			actReq.Weights.UseACTR = false
-		} else if resolved.ScoringFusion == "weighted_sum" {
-			actReq.Weights.DisableACTR = true
-			actReq.Weights.UseACTR = false
-		}
+	// Wire ScoringFusion from plasticity config to activation weights — on BOTH
+	// weight branches. Mode presets (semantic/recent/deep) arrive as explicit
+	// req.Weights, and while this wiring lived inside the else above, the
+	// vault's scoring_fusion knob was silently ignored for every preset recall.
+	// The request API carries no fusion field, so vault config is the only
+	// fusion source; an explicit DisableACTR request composes (fusion presets
+	// also disable ACT-R).
+	if resolved.ScoringFusion == "rrf" {
+		actReq.Weights.UseRRFFusion = true
+		actReq.Weights.DisableACTR = true
+		actReq.Weights.UseACTR = false
+	} else if resolved.ScoringFusion == "weighted_sum" {
+		actReq.Weights.DisableACTR = true
+		actReq.Weights.UseACTR = false
 	}
 
 	// Gate CGDN behind vault's ExperimentalCGDN flag.

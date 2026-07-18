@@ -393,3 +393,73 @@ func TestClearEmbedFlagsForMissing(t *testing.T) {
 		t.Errorf("second run cleared %d, want 0 (idempotent)", cleared2)
 	}
 }
+
+// TestClearEmbedFlagsForMissing_LabelWithoutRow is the "third animal" lock
+// (2026-07-18): merge/clone dropped 0x18 rows while leaving the record's
+// EmbedDim label intact (bug #4), so a label-only check counted those engrams
+// as embedded and the backfill skipped them — semantically blind jewels that
+// still claimed coverage. An engram whose label says embedded but whose 0x18
+// row is missing MUST be treated as missing.
+func TestClearEmbedFlagsForMissing_LabelWithoutRow(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("embed-liar-test")
+
+	const DigestEmbed uint8 = 0x02
+
+	// The liar: EmbedDim label set, but NO standalone 0x18 row (the post-merge
+	// shape). WriteEngram persists the label from the struct; we simply never
+	// plant the 0x18 row.
+	liar, err := store.WriteEngram(ctx, ws, &Engram{
+		Concept:  "gap-window jewel",
+		Content:  "merged during surgery; label says embedded, row is gone",
+		EmbedDim: EmbedDimension(4),
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram liar: %v", err)
+	}
+	if err := store.SetDigestFlag(ctx, liar, DigestEmbed); err != nil {
+		t.Fatalf("SetDigestFlag liar: %v", err)
+	}
+
+	// The honest one: label set AND 0x18 row present — must stay untouched.
+	honest, err := store.WriteEngram(ctx, ws, &Engram{
+		Concept:   "genuinely embedded",
+		Content:   "label and row agree",
+		Embedding: []float32{0.5, 0.5},
+		EmbedDim:  EmbedDimension(1),
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram honest: %v", err)
+	}
+	if err := store.db.Set(keys.EmbeddingKey(ws, [16]byte(honest)), []byte{1, 2, 3}, nil); err != nil {
+		t.Fatalf("plant honest embedding row: %v", err)
+	}
+	if err := store.SetDigestFlag(ctx, honest, DigestEmbed); err != nil {
+		t.Fatalf("SetDigestFlag honest: %v", err)
+	}
+
+	cleared, err := store.ClearEmbedFlagsForMissing(ctx, ws)
+	if err != nil {
+		t.Fatalf("ClearEmbedFlagsForMissing: %v", err)
+	}
+	if cleared != 1 {
+		t.Errorf("cleared = %d, want 1 (the liar only)", cleared)
+	}
+
+	flags, err := store.GetDigestFlags(ctx, liar)
+	if err != nil {
+		t.Fatalf("GetDigestFlags liar: %v", err)
+	}
+	if flags&DigestEmbed != 0 {
+		t.Errorf("liar engram still carries DigestEmbed — label trusted over row")
+	}
+
+	flags, err = store.GetDigestFlags(ctx, honest)
+	if err != nil {
+		t.Fatalf("GetDigestFlags honest: %v", err)
+	}
+	if flags&DigestEmbed == 0 {
+		t.Errorf("honest engram lost its DigestEmbed flag — row check touched a healthy engram")
+	}
+}

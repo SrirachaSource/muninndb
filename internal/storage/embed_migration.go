@@ -187,10 +187,23 @@ func (ps *PebbleStore) ClearEmbedFlagsForMissing(ctx context.Context, ws [8]byte
 	defer batch.Close()
 
 	scanErr := ps.ScanEngrams(ctx, ws, func(eng *Engram) error {
-		if eng.EmbedDim != 0 {
-			return nil
-		}
 		id := [16]byte(eng.ID)
+		// The record's EmbedDim label alone is NOT trusted: merge/clone dropped
+		// 0x18 rows while leaving labels intact (bug #4, fixed 12b2c2a), so a
+		// label can claim an embedding that no longer exists — the 2026-07-18
+		// "third animal": gap-window engrams invisible to a label-only check.
+		// An engram counts as embedded only if its 0x18 row is actually there.
+		if eng.EmbedDim != 0 {
+			_, closer, getErr := ps.db.Get(keys.EmbeddingKey(ws, id))
+			if getErr == nil {
+				closer.Close()
+				return nil // label AND row agree: genuinely embedded
+			}
+			if !errors.Is(getErr, pebble.ErrNotFound) {
+				return fmt.Errorf("check embedding row: %w", getErr)
+			}
+			// Label says embedded, row is gone — fall through and clear flags.
+		}
 
 		raw, err := ps.getDigestFlagsRaw(id)
 		noRecord := errors.Is(err, pebble.ErrNotFound)

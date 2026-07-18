@@ -1084,6 +1084,126 @@ func (s *Server) handleReembedMissingVault(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
 }
 
+// handleReweightLinks sets weights on EXISTING associations (curator repair).
+// POST /api/admin/vaults/{name}/reweight-links
+// Body: {"pairs": [{"source_id","target_id","weight"}...], "dry_run": bool}
+// Missing edges are reported per-pair, never created. Dry-run reports each
+// pair's current weight/peak/co-activation/duplicate-key state without writing.
+func (s *Server) handleReweightLinks(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+	var req struct {
+		Pairs  []engine.ReweightPair `json:"pairs"`
+		DryRun bool                  `json:"dry_run"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid JSON body")
+		return
+	}
+	if len(req.Pairs) == 0 {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "pairs required in body")
+		return
+	}
+	if len(req.Pairs) > engine.MaxReweightPairs {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, fmt.Sprintf("too many pairs (max %d)", engine.MaxReweightPairs))
+		return
+	}
+	result, err := s.engine.ReweightLinks(r.Context(), name, req.Pairs, req.DryRun)
+	if err != nil {
+		if result != nil {
+			// Partial apply: report what landed alongside the error.
+			s.EmitAudit(r, "vault.reweight_links", "vault", name, "partial", map[string]string{
+				"pairs":   fmt.Sprintf("%d", result.Requested),
+				"applied": fmt.Sprintf("%d", result.Applied),
+				"dry_run": fmt.Sprintf("%t", result.DryRun),
+			})
+		}
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.EmitAudit(r, "vault.reweight_links", "vault", name, "ok", map[string]string{
+		"pairs":   fmt.Sprintf("%d", result.Requested),
+		"applied": fmt.Sprintf("%d", result.Applied),
+		"dry_run": fmt.Sprintf("%t", result.DryRun),
+	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleRestoreLinkWeights raises every association weight in the vault to
+// peak*scale where currently below (decay-floor mass recovery).
+// POST /api/admin/vaults/{name}/restore-link-weights
+// Body: {"scale": 0.25, "dry_run": bool} — scale defaults to 0.25, the
+// engine's archive-restore convention. Dry-run responds 200 with scan counts;
+// apply responds 202 with a job id.
+func (s *Server) handleRestoreLinkWeights(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+	var req struct {
+		Scale  float32 `json:"scale"`
+		DryRun bool    `json:"dry_run"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid JSON body")
+		return
+	}
+	if req.Scale == 0 {
+		req.Scale = 0.25
+	}
+	if req.Scale < 0 || req.Scale > 1 {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "scale must be in (0, 1]")
+		return
+	}
+	if req.DryRun {
+		result, err := s.engine.RestoreLinkWeightsDryRun(r.Context(), name, req.Scale)
+		if err != nil {
+			if errors.Is(err, engine.ErrVaultNotFound) {
+				s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+				return
+			}
+			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+			return
+		}
+		s.EmitAudit(r, "vault.restore_link_weights", "vault", name, "dry_run", map[string]string{
+			"scale":       fmt.Sprintf("%g", result.Scale),
+			"scanned":     fmt.Sprintf("%d", result.Scanned),
+			"would_raise": fmt.Sprintf("%d", result.WouldRaise),
+		})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+		return
+	}
+	job, err := s.engine.StartRestoreLinkWeights(r.Context(), name, req.Scale)
+	if err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.EmitAudit(r, "vault.restore_link_weights", "vault", name, "ok", map[string]string{
+		"scale": fmt.Sprintf("%g", req.Scale),
+	})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
+}
+
 // handleExportVaultMarkdown exports a vault as a markdown .tgz archive.
 // GET /api/admin/vaults/{name}/export-markdown
 // Response: application/gzip stream with Content-Disposition attachment.

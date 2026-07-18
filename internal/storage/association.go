@@ -463,6 +463,13 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 				outRestoredAt = 0
 			}
 		}
+		// Restore passes stamp restoredAt on edges that have none, so the
+		// re-establishment rules above govern the restored weight from here on.
+		// An existing stamp is kept (never refreshed) and the clearing rules
+		// keep precedence on this call.
+		if update.SetRestoredAt && existingRestoredAt == 0 {
+			outRestoredAt = now
+		}
 
 		// Encode: use 30-byte archive format when the edge has (or had) a restoredAt.
 		if existingRestoredAt != 0 || outRestoredAt != 0 {

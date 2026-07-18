@@ -12,6 +12,11 @@ type AssocWeightUpdate struct {
 	Dst        ULID
 	Weight     float32
 	CountDelta uint32 // Hebbian co-activation increment to add to CoActivationCount
+	// SetRestoredAt stamps restoredAt=now when the edge does not already carry
+	// one, marking the new weight as a restore (not earned) so the engine's
+	// re-establishment rules apply. An existing stamp is never refreshed.
+	// Used by restore passes; Hebbian callers leave it false.
+	SetRestoredAt bool
 }
 
 // OrdinalEntry is a (childID, ordinal) pair returned by ListChildOrdinals.

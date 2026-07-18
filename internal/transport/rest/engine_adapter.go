@@ -305,6 +305,18 @@ func (w *RESTEngineWrapper) StartReembedMissing(ctx context.Context, vaultName s
 	return w.engine.StartReembedMissing(ctx, vaultName)
 }
 
+func (w *RESTEngineWrapper) ReweightLinks(ctx context.Context, vault string, pairs []engine.ReweightPair, dryRun bool) (*engine.ReweightResult, error) {
+	return w.engine.ReweightLinks(ctx, vault, pairs, dryRun)
+}
+
+func (w *RESTEngineWrapper) RestoreLinkWeightsDryRun(ctx context.Context, vault string, scale float32) (*engine.RestoreLinkWeightsResult, error) {
+	return w.engine.RestoreLinkWeightsDryRun(ctx, vault, scale)
+}
+
+func (w *RESTEngineWrapper) StartRestoreLinkWeights(ctx context.Context, vault string, scale float32) (*vaultjob.Job, error) {
+	return w.engine.StartRestoreLinkWeights(ctx, vault, scale)
+}
+
 func (w *RESTEngineWrapper) RenameVault(ctx context.Context, oldName, newName string) error {
 	return w.engine.RenameVault(ctx, oldName, newName)
 }

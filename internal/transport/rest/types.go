@@ -114,6 +114,16 @@ type EngineAPI interface {
 	// (EmbedDim == 0) and wakes the RetroactiveProcessor — partial-coverage
 	// backfill that never drops a healthy vector.
 	StartReembedMissing(ctx context.Context, vaultName string) (*vaultjob.Job, error)
+	// ReweightLinks sets the weight of EXISTING associations (curator repair):
+	// old-weight keys are deleted and edge metadata preserved. Missing edges are
+	// reported, never created. dryRun doubles as a per-pair census probe.
+	ReweightLinks(ctx context.Context, vault string, pairs []engine.ReweightPair, dryRun bool) (*engine.ReweightResult, error)
+	// RestoreLinkWeightsDryRun scans a vault and reports how many association
+	// weights a restore-to-peak pass at the given scale would raise.
+	RestoreLinkWeightsDryRun(ctx context.Context, vault string, scale float32) (*engine.RestoreLinkWeightsResult, error)
+	// StartRestoreLinkWeights raises every association weight to peak*scale
+	// (where below) as a background job — decay-floor mass recovery (202 pattern).
+	StartRestoreLinkWeights(ctx context.Context, vault string, scale float32) (*vaultjob.Job, error)
 	// CountEmbedded returns the number of engrams with the DigestEmbed flag set.
 	CountEmbedded(ctx context.Context) int64
 	// Observability returns the full system observability snapshot.

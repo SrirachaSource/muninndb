@@ -302,6 +302,18 @@ func (m *MockEngine) StartReembedMissing(ctx context.Context, vaultName string) 
 	return &vaultjob.Job{ID: "mock-reembed-missing-job", Operation: "reembed-missing", Source: vaultName, Target: vaultName}, nil
 }
 
+func (m *MockEngine) ReweightLinks(ctx context.Context, vault string, pairs []engine.ReweightPair, dryRun bool) (*engine.ReweightResult, error) {
+	return &engine.ReweightResult{Vault: vault, DryRun: dryRun, Requested: len(pairs)}, nil
+}
+
+func (m *MockEngine) RestoreLinkWeightsDryRun(ctx context.Context, vault string, scale float32) (*engine.RestoreLinkWeightsResult, error) {
+	return &engine.RestoreLinkWeightsResult{Vault: vault, Scale: scale, DryRun: true}, nil
+}
+
+func (m *MockEngine) StartRestoreLinkWeights(ctx context.Context, vault string, scale float32) (*vaultjob.Job, error) {
+	return &vaultjob.Job{ID: "mock-restore-link-weights-job", Operation: "restore-link-weights", Source: vault, Target: vault}, nil
+}
+
 func (m *MockEngine) CountEmbedded(ctx context.Context) int64 {
 	return 42
 }

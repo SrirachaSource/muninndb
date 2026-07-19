@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"math"
 	"math/rand"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/cockroachdb/pebble"
@@ -104,13 +106,51 @@ func (idx *Index) efC() int {
 	return EfConstruction
 }
 
-// efS returns the effective EfSearch for this index.
-// Allows per-index override (e.g., higher value for larger corpora).
+// scaledEfSearch is the auto-scaled query beam width for an n-node graph.
+// EfSearch=50 was tuned on ~1k-node vaults; at 32k nodes a 50-wide beam
+// misses healthy, well-linked nodes entirely (2026-07-19 trading-vault heal:
+// nodes found at rank 1 under ef=100 were invisible at ef=50 -- over a
+// thousand false "still-unreachable" verdicts from the beam alone). Scale
+// with size, floored at the classic default, capped to bound query latency.
+func scaledEfSearch(n int) int {
+	ef := n / 64
+	if ef < EfSearch {
+		return EfSearch
+	}
+	if ef > 800 {
+		return 800
+	}
+	return ef
+}
+
+// efSearchEnv reads MUNINN_EF_SEARCH once: a global operator pin that beats
+// the auto-scale (but never an explicit per-index NewWithParams override).
+var efSearchEnv = func() func() int {
+	var once sync.Once
+	var v int
+	return func() int {
+		once.Do(func() {
+			if s := os.Getenv("MUNINN_EF_SEARCH"); s != "" {
+				if n, err := strconv.Atoi(s); err == nil && n > 0 {
+					v = n
+				}
+			}
+		})
+		return v
+	}
+}()
+
+// efS returns the effective EfSearch for this index: explicit per-index
+// override > MUNINN_EF_SEARCH env pin > vault-size auto-scale.
+// Callers hold idx.mu (len(idx.nodes) read).
 func (idx *Index) efS() int {
 	if idx.efSearch > 0 {
 		return idx.efSearch
 	}
-	return EfSearch
+	if v := efSearchEnv(); v > 0 {
+		return v
+	}
+	return scaledEfSearch(len(idx.nodes))
 }
 
 func New(db *pebble.DB, ws [8]byte) *Index {

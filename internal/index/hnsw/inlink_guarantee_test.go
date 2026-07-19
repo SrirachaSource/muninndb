@@ -428,3 +428,33 @@ func TestNodeIDsSortedSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// efSearch auto-scale (the verification-beam artifact, 2026-07-19)
+// ---------------------------------------------------------------------------
+
+func TestScaledEfSearchCurve(t *testing.T) {
+	cases := []struct{ n, want int }{
+		{0, EfSearch},        // empty -> classic default
+		{1000, EfSearch},     // small vault -> floor holds
+		{3200, EfSearch},     // boundary region -> still the floor
+		{32000, 500},         // the trading vault -> the beam that told the truth
+		{100000, 800},        // giant vault -> latency cap
+	}
+	for _, c := range cases {
+		if got := scaledEfSearch(c.n); got != c.want {
+			t.Errorf("scaledEfSearch(%d) = %d, want %d", c.n, got, c.want)
+		}
+	}
+}
+
+func TestEfSExplicitOverrideBeatsAutoScale(t *testing.T) {
+	idx := memIndexT(t, 200, 123) // explicit efSearch via NewWithParams
+	if got := idx.efS(); got != 123 {
+		t.Errorf("explicit override: efS() = %d, want 123", got)
+	}
+	idx2 := memIndexT(t, 200, 0) // no override -> auto-scale (empty graph = floor)
+	if got := idx2.efS(); got != EfSearch {
+		t.Errorf("auto-scale on empty graph: efS() = %d, want %d", got, EfSearch)
+	}
+}

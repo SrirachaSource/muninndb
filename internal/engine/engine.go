@@ -1714,6 +1714,9 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 
 	// Fire implicit positive feedback signal asynchronously — read = accessed.
 	// spawnFireAndForget ensures Stop() drains this goroutine before DB close.
+	// The row bump (AccessCount/LastAccess) rides the same goroutine: scoring
+	// feedback alone left the ROW untouched, and "never accessed" read true of
+	// every engram ever used (muninn's reservoir audit, 2026-07-19).
 	e.spawnFireAndForget(func() {
 		signal := scoring.FeedbackSignal{
 			EngramID:    [16]byte(id),
@@ -1722,6 +1725,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 			Timestamp:   time.Now(),
 		}
 		e.scoring.RecordFeedback(e.stopCtx, wsPrefix, signal)
+		e.persistAccess(e.stopCtx, wsPrefix, id)
 	})
 
 	// Collect entities linked to this engram (0x20 forward index).
@@ -2196,6 +2200,25 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		e.latencyTracker.Record(wsPrefix, "activate", d)
 	}
 	metrics.ActivateDuration.WithLabelValues(req.Vault).Observe(d.Seconds())
+
+	// Persist access on the RETURNED hits (primary activations only -- a
+	// co-activated tag-along was surfaced as context, not used; counting it
+	// would inflate "used" and defeat retention rules keyed on real recall).
+	// Async on the drained fire-and-forget rail; k is bounded by the request
+	// limit, and each engram is L1-hot (the items were just built from it).
+	if len(items) > 0 {
+		hitIDs := make([]storage.ULID, 0, len(items))
+		for _, item := range items {
+			if hid, perr := storage.ParseULID(item.ID); perr == nil {
+				hitIDs = append(hitIDs, hid)
+			}
+		}
+		e.spawnFireAndForget(func() {
+			for _, hid := range hitIDs {
+				e.persistAccess(e.stopCtx, wsPrefix, hid)
+			}
+		})
+	}
 
 	return &mbp.ActivateResponse{
 		QueryID:     e.fastQueryID(),
@@ -3119,6 +3142,36 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 
 // RecordAccess increments the access count and updates the last-accessed timestamp
 // for the engram identified by id in the given vault.
+// persistAccess bumps the row's AccessCount/LastAccess for one engram -- the
+// durable half of "this memory was used". Quiet by contract: access
+// bookkeeping must never break or slow a read path (errors are logged at
+// debug, writes are NoSync via UpdateMetadata's normal path).
+//
+// WHY (2026-07-19, muninn's reservoir audit): reads and recalls fired scoring
+// feedback but never touched the ROW, so last_access == created_at to the
+// nanosecond on every engram ever used. "Never accessed" was true of the
+// whole store, and any retention rule keyed on it would have swept living
+// memories with the sludge -- muninn held a 14,919-engram quarantine on
+// exactly this fiction.
+func (e *Engine) persistAccess(ctx context.Context, wsPrefix [8]byte, id storage.ULID) {
+	eng, err := e.store.GetEngram(ctx, wsPrefix, id)
+	if err != nil || eng == nil {
+		return
+	}
+	meta := &storage.EngramMeta{
+		State:       eng.State,
+		Confidence:  eng.Confidence,
+		Relevance:   eng.Relevance,
+		Stability:   eng.Stability,
+		AccessCount: eng.AccessCount + 1,
+		UpdatedAt:   eng.UpdatedAt,
+		LastAccess:  time.Now(),
+	}
+	if uerr := e.store.UpdateMetadata(ctx, wsPrefix, id, meta); uerr != nil {
+		slog.Debug("engine: persist access failed", "id", id.String(), "err", uerr)
+	}
+}
+
 func (e *Engine) RecordAccess(ctx context.Context, vault, id string) error {
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)

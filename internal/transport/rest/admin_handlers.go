@@ -1225,6 +1225,81 @@ func (s *Server) handleVaultVectorAudit(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// ReachabilityRepairResponse is the wire shape of POST
+// /api/admin/vaults/{name}/reachability-repair.
+type ReachabilityRepairResponse struct {
+	Vault       string   `json:"vault"`
+	ProbeK      int      `json:"probe_k"`
+	Limit       int      `json:"limit"`
+	Scanned     int      `json:"scanned"`
+	Unreachable []string `json:"unreachable"`
+	Repaired    int      `json:"repaired"`
+	Verified    int      `json:"verified"`
+	Failed      []string `json:"failed"`
+	Skipped     []string `json:"skipped"`
+	NextAfter   string   `json:"next_after"`
+	Done        bool     `json:"done"`
+	DryRun      bool     `json:"dry_run"`
+}
+
+// handleReachabilityRepair self-probes a page of graph nodes and re-inserts
+// the unreachable ones (in-link starvation repair). POST because a live run
+// mutates the graph; dry_run=1 is the read-only census.
+// POST /api/admin/vaults/{name}/reachability-repair?k=N&limit=N&after=<ulid>&dry_run=1
+func (s *Server) handleReachabilityRepair(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" || !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid vault name")
+		return
+	}
+	q := r.URL.Query()
+	probeK := 0
+	if kStr := q.Get("k"); kStr != "" {
+		if k, err := strconv.Atoi(kStr); err == nil && k > 0 {
+			probeK = k
+		}
+	}
+	limit := 0
+	if lStr := q.Get("limit"); lStr != "" {
+		if n, err := strconv.Atoi(lStr); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	after := q.Get("after")
+	dryRun := q.Get("dry_run") == "1" || q.Get("dry_run") == "true"
+
+	data, err := s.engine.ReachabilityRepair(r.Context(), name, probeK, limit, after, dryRun)
+	if err != nil {
+		if strings.Contains(err.Error(), "parse after") {
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
+			return
+		}
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.EmitAudit(r, "vault.reachability_repair", "vault", name, "ok", map[string]string{
+		"scanned":     strconv.Itoa(data.Scanned),
+		"unreachable": strconv.Itoa(len(data.Unreachable)),
+		"repaired":    strconv.Itoa(data.Repaired),
+		"verified":    strconv.Itoa(data.Verified),
+		"dry_run":     strconv.FormatBool(data.DryRun),
+	})
+	s.sendJSON(w, http.StatusOK, ReachabilityRepairResponse{
+		Vault:       data.Vault,
+		ProbeK:      data.ProbeK,
+		Limit:       data.Limit,
+		Scanned:     data.Scanned,
+		Unreachable: data.Unreachable,
+		Repaired:    data.Repaired,
+		Verified:    data.Verified,
+		Failed:      data.Failed,
+		Skipped:     data.Skipped,
+		NextAfter:   data.NextAfter,
+		Done:        data.Done,
+		DryRun:      data.DryRun,
+	})
+}
+
 // handleReweightLinks sets weights on EXISTING associations (curator repair).
 // POST /api/admin/vaults/{name}/reweight-links
 // Body: {"pairs": [{"source_id","target_id","weight"}...], "dry_run": bool}

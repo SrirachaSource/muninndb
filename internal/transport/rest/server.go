@@ -260,6 +260,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed-missing", s.withAdminMiddleware(s.handleReembedMissingVault))
 	mux.HandleFunc("GET /api/admin/vaults/{name}/engrams/{id}/vector-status", s.withAdminMiddleware(s.handleVectorStatus))
 	mux.HandleFunc("GET /api/admin/vaults/{name}/vector-audit", s.withAdminMiddleware(s.handleVaultVectorAudit))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/reachability-repair", s.withAdminMiddleware(s.handleReachabilityRepair))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reweight-links", s.withAdminMiddleware(s.handleReweightLinks))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/restore-link-weights", s.withAdminMiddleware(s.handleRestoreLinkWeights))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/rename", s.withAdminMiddleware(s.handleRenameVault))

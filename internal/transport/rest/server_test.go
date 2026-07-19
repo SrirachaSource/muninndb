@@ -326,6 +326,10 @@ func (m *MockEngine) VaultVectorAudit(ctx context.Context, vault string, sampleC
 	return &engine.VaultVectorAuditData{Vault: vault, SampleCap: sampleCap}, nil
 }
 
+func (m *MockEngine) ReachabilityRepair(ctx context.Context, vault string, probeK, limit int, after string, dryRun bool) (*engine.ReachabilityRepairData, error) {
+	return &engine.ReachabilityRepairData{Vault: vault, ProbeK: probeK, Limit: limit, Done: true, DryRun: dryRun}, nil
+}
+
 func (m *MockEngine) Observability(ctx context.Context, version string, uptimeSeconds int64) (*engine.ObservabilitySnapshot, error) {
 	return &engine.ObservabilitySnapshot{}, nil
 }

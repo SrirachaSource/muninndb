@@ -269,6 +269,10 @@ func (w *RESTEngineWrapper) VaultVectorAudit(ctx context.Context, vault string, 
 	return w.engine.VaultVectorAudit(ctx, vault, sampleCap)
 }
 
+func (w *RESTEngineWrapper) ReachabilityRepair(ctx context.Context, vault string, probeK, limit int, after string, dryRun bool) (*engine.ReachabilityRepairData, error) {
+	return w.engine.ReachabilityRepair(ctx, vault, probeK, limit, after, dryRun)
+}
+
 func (w *RESTEngineWrapper) RecordAccess(ctx context.Context, vault, id string) error {
 	return w.engine.RecordAccess(ctx, vault, id)
 }

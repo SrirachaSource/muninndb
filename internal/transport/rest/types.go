@@ -162,6 +162,9 @@ type EngineAPI interface {
 	// VaultVectorAudit cross-checks label/row/graph agreement across a vault
 	// and samples divergent IDs. Read-only.
 	VaultVectorAudit(ctx context.Context, vault string, sampleCap int) (*engine.VaultVectorAuditData, error)
+	// ReachabilityRepair self-probes a page of graph nodes and re-inserts the
+	// unreachable ones (in-link starvation repair). Read-only when dryRun.
+	ReachabilityRepair(ctx context.Context, vault string, probeK, limit int, after string, dryRun bool) (*engine.ReachabilityRepairData, error)
 }
 
 // ── Web UI types ─────────────────────────────────────────────────────────

@@ -442,6 +442,7 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 		}
 
 		// Add bidirectional connections
+		backlinkSurvived := false
 		for _, nb := range neighbors {
 			nbNode := idx.nodes[nb.id]
 			if nbNode == nil {
@@ -470,9 +471,41 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 					return CosineSimilarity(nbVec, na.vec) > CosineSimilarity(nbVec, nb2.vec)
 				})
 				nbNode.layers[l] = list[:maxConn]
+				if l == 0 && !backlinkSurvived {
+					for _, e := range nbNode.layers[0] {
+						if e == id {
+							backlinkSurvived = true
+							break
+						}
+					}
+				}
+			} else if l == 0 {
+				backlinkSurvived = true
 			}
 			nbNode.mu.Unlock()
 			mutated[nb.id] = nbNode
+		}
+
+		// In-link guarantee (layer 0). In a saturated neighborhood every
+		// selected neighbor prunes the just-appended back-link in the same
+		// breath, and the node is born with out-edges only -- unreachable,
+		// since Search explores layer-0 edges of reachable nodes and nothing
+		// points here (the 2026-07-17 rare nodes and swing's bridge engram
+		// died of exactly this). Pin the back-link into the nearest live
+		// neighbor: it stays even when it sorts beyond M0, evicting the
+		// farthest non-pinned entry instead. The nearest neighbor was found
+		// from the entry point, so it is reachable and the pin restores a
+		// path transitively.
+		if l == 0 && !backlinkSurvived {
+			for _, nb := range neighbors {
+				nbNode := idx.nodes[nb.id]
+				if nbNode == nil {
+					continue
+				}
+				idx.pinBacklink(nbNode, id)
+				mutated[nb.id] = nbNode
+				break
+			}
 		}
 
 		if len(neighbors) > 0 {
@@ -495,6 +528,50 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 		idx.persistWg.Add(1)
 		go idx.persistNode(nbID, nbNode)
 	}
+}
+
+// pinBacklink force-wires nbNode -> id at layer 0, keeping the list at or
+// under M0 by evicting the farthest non-pinned entry when full. Callers hold
+// idx.mu (the comparator reads idx.nodes, same as the prune in Insert).
+func (idx *Index) pinBacklink(nbNode *HNSWNode, id [16]byte) {
+	nbNode.mu.Lock()
+	defer nbNode.mu.Unlock()
+	if len(nbNode.layers) == 0 {
+		nbNode.layers = append(nbNode.layers, nil)
+	}
+	list := nbNode.layers[0]
+	for _, e := range list {
+		if e == id {
+			return
+		}
+	}
+	list = append(list, id)
+	nbVec := nbNode.vec
+	sort.Slice(list, func(a, b int) bool {
+		na, nb2 := idx.nodes[list[a]], idx.nodes[list[b]]
+		if na == nil || nb2 == nil {
+			return nb2 == nil && na != nil
+		}
+		return CosineSimilarity(nbVec, na.vec) > CosineSimilarity(nbVec, nb2.vec)
+	})
+	if len(list) > M0 {
+		kept := list[:M0]
+		present := false
+		for _, e := range kept {
+			if e == id {
+				present = true
+				break
+			}
+		}
+		if !present {
+			// id sorted beyond the cap: every kept entry is nearer, so the
+			// minimal eviction is the farthest kept entry -- overwrite the
+			// slot at M0-1 with the pinned id.
+			kept[M0-1] = id
+		}
+		list = kept
+	}
+	nbNode.layers[0] = list
 }
 
 func (idx *Index) greedyDescend(ep [16]byte, epVec, query []float32, l int, newEP *[16]byte) []float32 {

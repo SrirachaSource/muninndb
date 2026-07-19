@@ -822,9 +822,15 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	}
 	batch.Set(metaKey, metaSlice, nil)
 
+	// Flag RMW under digestFlagMu, held THROUGH the commit (the write only
+	// lands then): this is the other half of the SetDigestFlag race -- the
+	// enrich processor's read-OR-commit here straddled the embed processor's
+	// SetDigestFlag and dropped its bit (KLAC 2026-07-18).
+	ps.digestFlagMu.Lock()
 	flags, flagsErr := ps.getDigestFlagsRaw([16]byte(id))
 	if flagsErr != nil {
 		if !errors.Is(flagsErr, pebble.ErrNotFound) {
+			ps.digestFlagMu.Unlock()
 			return fmt.Errorf("UpdateDigest: read digest flags: %w", flagsErr)
 		}
 		flags = 0
@@ -842,8 +848,10 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	ps.metaCache.Remove([16]byte(id))
 
 	if err := batch.Commit(pebble.NoSync); err != nil {
+		ps.digestFlagMu.Unlock()
 		return fmt.Errorf("UpdateDigest: commit: %w", err)
 	}
+	ps.digestFlagMu.Unlock()
 	ps.replicateBatch(batch)
 
 	return nil

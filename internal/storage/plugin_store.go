@@ -112,7 +112,12 @@ func (ps *PebbleStore) ScanWithoutFlag(ctx context.Context, flag, skipFlags uint
 }
 
 // SetDigestFlag sets a digest flag bit on an engram's digest flags record.
+// The read-OR-write is guarded by digestFlagMu: the embed and enrich
+// processors both RMW this byte on fresh evolves, and the unlocked window
+// silently dropped whichever bit landed first (KLAC 2026-07-18).
 func (ps *PebbleStore) SetDigestFlag(ctx context.Context, id ULID, flag uint8) error {
+	ps.digestFlagMu.Lock()
+	defer ps.digestFlagMu.Unlock()
 	raw, err := ps.getDigestFlagsRaw([16]byte(id))
 	if err != nil {
 		if !errors.Is(err, pebble.ErrNotFound) {

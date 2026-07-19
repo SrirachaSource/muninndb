@@ -42,6 +42,12 @@ type PebbleStoreConfig struct {
 // PebbleStore is the concrete Pebble-backed implementation of EngineStore.
 type PebbleStore struct {
 	db            *pebble.DB
+	// digestFlagMu serializes every read-modify-write of a digest-flags byte
+	// (SetDigestFlag, UpdateDigest). The byte is a bitfield shared by the embed
+	// and enrich processors; unlocked RMW lost bits when their windows straddled
+	// (KLAC 2026-07-18: flag_embedded read FALSE over healthy stores). Writes are
+	// low-frequency (digest completions), so one store-wide mutex is enough.
+	digestFlagMu  sync.Mutex
 	cache         *L1Cache
 	mol           *wal.MOL
 	gc            *wal.GroupCommitter

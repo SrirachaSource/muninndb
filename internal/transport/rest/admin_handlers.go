@@ -1104,8 +1104,16 @@ type VectorStatusResponse struct {
 	GraphTombstoned     bool                 `json:"graph_tombstoned"`
 	GraphEdgesPerLayer  []int                `json:"graph_edges_per_layer,omitempty"`
 	VaultVectors        int                  `json:"vault_vectors"`
-	SemanticSearchable  bool                 `json:"semantic_searchable"`
-	Probe               *VectorProbeResponse `json:"probe,omitempty"`
+	// GraphPresent is node-in-graph presence -- what semantic_searchable used
+	// to (dishonestly) claim. Presence does NOT imply searchability: an
+	// in-link-starved orphan is present and unreachable.
+	GraphPresent bool `json:"graph_present"`
+	// SemanticSearchable is only emitted when a probe ran (?probe=1): the
+	// self-probe is the sole store that tests actual reachability. Absent
+	// means UNKNOWN, never true-by-presence (muninn caught the old field
+	// reading true on every blind orphan, 2026-07-19).
+	SemanticSearchable *bool                `json:"semantic_searchable,omitempty"`
+	Probe              *VectorProbeResponse `json:"probe,omitempty"`
 }
 
 // VectorProbeResponse reports the optional k-NN self-probe (?probe=1).
@@ -1167,10 +1175,12 @@ func (s *Server) handleVectorStatus(w http.ResponseWriter, r *http.Request) {
 		GraphTombstoned:     data.GraphTombstoned,
 		GraphEdgesPerLayer:  data.GraphEdges,
 		VaultVectors:        data.VaultVectors,
-		SemanticSearchable:  data.GraphInMemory && !data.GraphTombstoned,
+		GraphPresent:        data.GraphInMemory && !data.GraphTombstoned,
 	}
 	if data.ProbeRequested {
 		resp.Probe = &VectorProbeResponse{Found: data.ProbeFound, Rank: data.ProbeRank, K: probeK}
+		searchable := data.ProbeFound && !data.GraphTombstoned
+		resp.SemanticSearchable = &searchable
 	}
 	s.EmitAudit(r, "vault.vector_status", "engram", data.EngramID, "ok", nil)
 	s.sendJSON(w, http.StatusOK, resp)

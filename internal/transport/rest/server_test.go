@@ -319,7 +319,14 @@ func (m *MockEngine) CountEmbedded(ctx context.Context) int64 {
 }
 
 func (m *MockEngine) VectorStatus(ctx context.Context, vault, engramID string, probe bool, probeK int) (*engine.VectorStatusData, error) {
-	return &engine.VectorStatusData{EngramID: engramID, Vault: vault}, nil
+	// Blind-orphan shape: node present in the graph, self-probe (when asked)
+	// does NOT find it -- the case the semantic_searchable honesty fix guards.
+	d := &engine.VectorStatusData{EngramID: engramID, Vault: vault, GraphInMemory: true}
+	if probe {
+		d.ProbeRequested = true
+		d.ProbeFound = false
+	}
+	return d, nil
 }
 
 func (m *MockEngine) VaultVectorAudit(ctx context.Context, vault string, sampleCap int) (*engine.VaultVectorAuditData, error) {

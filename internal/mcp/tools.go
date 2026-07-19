@@ -259,6 +259,7 @@ func allToolDefinitions() []ToolDefinition {
 					"vault":       vaultProp,
 					"id":          map[string]any{"type": "string", "description": "ID of the memory to evolve."},
 					"new_content": map[string]any{"type": "string", "description": "Updated information."},
+					"concept":     map[string]any{"type": "string", "description": "Optional new concept/title for the evolved version. Omit to keep the old concept with an ' (evolved)' suffix."},
 					"reason":      map[string]any{"type": "string", "description": "Why this memory is being updated."},
 					"embedding": map[string]any{
 						"type":        "array",

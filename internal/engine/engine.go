@@ -2738,7 +2738,20 @@ const evolveMaxAssocMigration = 1000
 // All writes (new engram, supersedes association, migrated associations, old engram
 // state) are committed in a single atomic Pebble batch so a crash cannot leave the
 // store in an inconsistent state.
+// Evolve updates a memory keeping the auto-derived concept (old + " (evolved)").
+// Thin delegate so existing callers are untouched; the concept-aware path is
+// EvolveWithConcept.
 func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32) (storage.ULID, error) {
+	return e.EvolveWithConcept(ctx, vault, oldID, newContent, reason, "", embedding)
+}
+
+// EvolveWithConcept is Evolve with an optional caller-supplied concept for the
+// new version. Empty concept keeps the historic auto-derivation. WHY (2026-07-18,
+// "the title half of Bucket C"): evolve hardcoded `old + " (evolved)"`, so a
+// title-lint repair evolving an engram to fix its TITLE could never actually
+// change it -- the lint survived its own repair, and stacked evolutions grew
+// "(evolved) (evolved)" tails.
+func (e *Engine) EvolveWithConcept(ctx context.Context, vault, oldID, newContent, reason, concept string, embedding []float32) (storage.ULID, error) {
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
 	// Parse the old ULID before any writes.
@@ -2801,9 +2814,13 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	// supersedes association within the same batch.
 	newULID := storage.NewULID()
 	now := time.Now()
+	newConcept := concept
+	if newConcept == "" {
+		newConcept = oldEng.Concept + " (evolved)"
+	}
 	newEng := &storage.Engram{
 		ID:      newULID,
-		Concept: oldEng.Concept + " (evolved)",
+		Concept: newConcept,
 		Content: newContent,
 		Tags:    oldEng.Tags,
 		// Inherit the epistemic state. Hardcoding these manufactured certainty:

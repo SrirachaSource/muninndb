@@ -66,3 +66,47 @@ func TestEvolve_AtomicBatch_OldSoftDeletedNewReadable(t *testing.T) {
 	assert.Equal(t, oldULID, assocs[0].TargetID, "association must point to old engram")
 	assert.Equal(t, storage.RelSupersedes, assocs[0].RelType, "association type must be RelSupersedes")
 }
+
+// The "title half of Bucket C" (2026-07-18): evolve hardcoded the new concept
+// to old + " (evolved)", so a title-lint repair could never actually change a
+// title and stacked evolutions grew "(evolved) (evolved)" tails.
+func TestEvolveWithConcept_CallerTitleWins(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "test", Concept: "Bad Lint Title", Content: "original content",
+	})
+	require.NoError(t, err)
+
+	newID, err := eng.EvolveWithConcept(ctx, "test", resp.ID,
+		"repaired content", "title repair", "Clean Honest Title", nil)
+	require.NoError(t, err)
+
+	ws := eng.store.ResolveVaultPrefix("test")
+	newEng, err := eng.store.GetEngram(ctx, ws, newID)
+	require.NoError(t, err)
+	require.NotNil(t, newEng)
+	assert.Equal(t, "Clean Honest Title", newEng.Concept)
+}
+
+func TestEvolve_EmptyConceptKeepsAutoDerivation(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "test", Concept: "Original", Content: "old content two",
+	})
+	require.NoError(t, err)
+
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "new content two", "update", nil)
+	require.NoError(t, err)
+
+	ws := eng.store.ResolveVaultPrefix("test")
+	newEng, err := eng.store.GetEngram(ctx, ws, newID)
+	require.NoError(t, err)
+	require.NotNil(t, newEng)
+	assert.Equal(t, "Original (evolved)", newEng.Concept)
+}

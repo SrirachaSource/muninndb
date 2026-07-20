@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -45,6 +47,11 @@ func parseEmbeddingArg(args map[string]any) ([]float32, string) {
 }
 
 func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	if rejectUnknownArgs(w, id, args, "vault", "content", "concept", "tags",
+		"confidence", "created_at", "type", "type_label", "summary", "entities",
+		"relationships", "entity_relationships", "embedding", "op_id") {
+		return
+	}
 	opID, _ := args["op_id"].(string)
 	if opID != "" {
 		// Acquire a per-op_id mutex to prevent TOCTOU races: without this lock,
@@ -506,7 +513,32 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 	sendResult(w, id, textContent(mustJSON(status)))
 }
 
+// rejectUnknownArgs guards a write-path tool against silent field drops: an
+// argument key outside the tool's schema is a caller bug (e.g. "content"
+// passed to evolve instead of "new_content"), and ignoring it means the
+// payload the caller meant to write vanishes without an error. Returns true
+// (after sending the error) when the call must be aborted.
+func rejectUnknownArgs(w http.ResponseWriter, id json.RawMessage, args map[string]any, allowed ...string) bool {
+	var unknown []string
+	for k := range args {
+		if !slices.Contains(allowed, k) {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return false
+	}
+	sort.Strings(unknown)
+	sendError(w, id, -32602, fmt.Sprintf(
+		"invalid params: unknown argument(s): %s; allowed: %s",
+		strings.Join(unknown, ", "), strings.Join(allowed, ", ")))
+	return true
+}
+
 func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	if rejectUnknownArgs(w, id, args, "vault", "id", "new_content", "reason", "concept", "embedding") {
+		return
+	}
 	engramID, ok1 := args["id"].(string)
 	newContent, ok2 := args["new_content"].(string)
 	reason, ok3 := args["reason"].(string)

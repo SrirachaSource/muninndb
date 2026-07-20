@@ -568,7 +568,7 @@ func TestEvolveEndpoint_EngineError(t *testing.T) {
 
 type evolveErrorEngine struct{ MockEngine }
 
-func (e *evolveErrorEngine) Evolve(_ context.Context, _, _, _, _ string) (*EvolveResponse, error) {
+func (e *evolveErrorEngine) Evolve(_ context.Context, _, _, _, _, _ string) (*EvolveResponse, error) {
 	return nil, errors.New("evolve failed")
 }
 

@@ -131,7 +131,7 @@ func (m *mockEngine) Checkpoint(destDir string) error {
 	return nil
 }
 
-func (m *mockEngine) Evolve(ctx context.Context, vault, engramID, newContent, reason string) (*rest.EvolveResponse, error) {
+func (m *mockEngine) Evolve(ctx context.Context, vault, engramID, newContent, reason, concept string) (*rest.EvolveResponse, error) {
 	return &rest.EvolveResponse{ID: "evolved-id"}, nil
 }
 func (m *mockEngine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*rest.ConsolidateResponse, error) {

@@ -105,9 +105,9 @@ func (e *vaultTrackingEngine) GetSession(ctx context.Context, req *GetSessionReq
 	return e.MockEngine.GetSession(ctx, req)
 }
 
-func (e *vaultTrackingEngine) Evolve(ctx context.Context, vault, engramID, newContent, reason string) (*EvolveResponse, error) {
+func (e *vaultTrackingEngine) Evolve(ctx context.Context, vault, engramID, newContent, reason, concept string) (*EvolveResponse, error) {
 	e.lastEvolveVault = vault
-	return e.MockEngine.Evolve(ctx, vault, engramID, newContent, reason)
+	return e.MockEngine.Evolve(ctx, vault, engramID, newContent, reason, concept)
 }
 
 func (e *vaultTrackingEngine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResponse, error) {

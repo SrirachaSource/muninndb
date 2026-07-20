@@ -33,8 +33,9 @@ const testEngramID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
 // MockEngine is a mock implementation of EngineAPI for testing.
 type MockEngine struct {
-	lastActivityReq  *ActivityCountsRequest
+	lastActivityReq   *ActivityCountsRequest
 	activityCountsErr error
+	lastEvolveConcept string
 }
 
 func (m *MockEngine) Hello(ctx context.Context, req *HelloRequest) (*HelloResponse, error) {
@@ -209,7 +210,8 @@ func (m *MockEngine) Checkpoint(destDir string) error {
 	return nil
 }
 
-func (m *MockEngine) Evolve(ctx context.Context, vault, engramID, newContent, reason string) (*EvolveResponse, error) {
+func (m *MockEngine) Evolve(ctx context.Context, vault, engramID, newContent, reason, concept string) (*EvolveResponse, error) {
+	m.lastEvolveConcept = concept
 	return &EvolveResponse{ID: "evolved-id"}, nil
 }
 

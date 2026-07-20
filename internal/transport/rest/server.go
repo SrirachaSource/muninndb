@@ -1465,16 +1465,22 @@ func (s *Server) handleEvolve(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		NewContent string `json:"new_content"`
 		Reason     string `json:"reason"`
+		Concept    string `json:"concept"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+	// An unknown body field on a mutator is a caller bug (e.g. "content"
+	// instead of "new_content") — reject it loudly or the payload the caller
+	// meant to write is silently dropped and a placeholder lands instead.
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body: "+err.Error())
 		return
 	}
 	if body.NewContent == "" || body.Reason == "" {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "'new_content' and 'reason' are required")
 		return
 	}
-	resp, err := s.engine.Evolve(r.Context(), ctxVault(r), id, body.NewContent, body.Reason)
+	resp, err := s.engine.Evolve(r.Context(), ctxVault(r), id, body.NewContent, body.Reason, body.Concept)
 	if err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return

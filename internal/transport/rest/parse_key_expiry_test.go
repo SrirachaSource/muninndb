@@ -121,7 +121,7 @@ func (e *retryEnrichErrRESTEngine) RetryEnrich(_ context.Context, _, _ string) (
 // evolveErrEngine returns an error from Evolve.
 type evolveErrEngine struct{ MockEngine }
 
-func (e *evolveErrEngine) Evolve(_ context.Context, _, _, _, _ string) (*EvolveResponse, error) {
+func (e *evolveErrEngine) Evolve(_ context.Context, _, _, _, _, _ string) (*EvolveResponse, error) {
 	return nil, fmt.Errorf("evolve engine error")
 }
 

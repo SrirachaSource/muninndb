@@ -136,7 +136,7 @@ type EngineAPI interface {
 	Checkpoint(destDir string) error
 
 	// Extended operations — previously MCP-only.
-	Evolve(ctx context.Context, vault, engramID, newContent, reason string) (*EvolveResponse, error)
+	Evolve(ctx context.Context, vault, engramID, newContent, reason, concept string) (*EvolveResponse, error)
 	Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResponse, error)
 	Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*DecideResponse, error)
 	Restore(ctx context.Context, vault, engramID string) (*RestoreResponse, error)

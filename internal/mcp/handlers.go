@@ -1282,8 +1282,21 @@ func applyTypeArgs(args map[string]any, req *mbp.WriteRequest) {
 	}
 }
 
-// applyEnrichmentArgs parses optional inline enrichment fields (summary, entities,
-// relationships) from MCP tool call arguments onto the WriteRequest.
+// validEntityTypes is the CLOSED set of entity types a caller may declare.
+//
+// CONSTRAINT, and callers routinely do not expect it: a declared type outside
+// this set is not rejected -- it is COERCED TO "other" (see applyEnrichmentArgs
+// below). So `commit`, `env_var` and `desk` all store as "other", and a
+// post-write read-back then looks like corruption when it is validation. That
+// confusion is what issue #80 was filed as.
+//
+// The coercion is deliberate and unit-tested (TestApplyEnrichmentArgs_*). What
+// was wrong was the SILENCE: callers are now told via coercedTypeHint, surfaced
+// on the write response Hint by muninn_remember and muninn_remember_batch.
+//
+// EXTENDING THIS SET: internal/plugin/enrich/parse.go keeps its own
+// knownEntityTypes list and web/static/js/app.js:getEntityTypeColor keeps a
+// colour map. Extend all three together or the layers disagree.
 var validEntityTypes = map[string]bool{
 	"person": true, "organization": true, "location": true, "concept": true,
 	"technology": true, "project": true, "tool": true, "database": true,
@@ -1321,8 +1334,13 @@ func sortedValidEntityTypes() []string {
 	return out
 }
 
-// applyEnrichmentArgs returns the number of malformed entity items skipped, and
-// the sorted-unique set of declared entity types that were coerced to "other".
+// applyEnrichmentArgs parses optional inline enrichment fields (summary, entities,
+// relationships) from MCP tool call arguments onto the WriteRequest.
+//
+// It returns the number of malformed entity items skipped, and the sorted-unique
+// set of declared entity types that were coerced to "other" per validEntityTypes.
+// Callers must surface the second return via the response Hint (coercedTypeHint);
+// dropping it silently is the defect issue #80 was filed for.
 func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) (int, []string) {
 	malformed := 0
 	coercedSet := map[string]bool{}

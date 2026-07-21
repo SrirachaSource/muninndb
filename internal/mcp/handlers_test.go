@@ -3555,3 +3555,61 @@ func TestHandleRecall_AnnotateFalse_NoAnnotations(t *testing.T) {
 		t.Error("annotations should be absent when annotate=false (or not set)")
 	}
 }
+
+// Issue #80: a caller-declared entity type outside validEntityTypes is stored as
+// "other". That coercion is deliberate, but it was SILENT -- the caller was never
+// told the store kept a different type than it declared. These lock the warning.
+func TestApplyEnrichmentArgs_ReportsCoercedTypes(t *testing.T) {
+	args := map[string]any{
+		"entities": []any{
+			map[string]any{"name": "deadbeef", "type": "commit"},
+			map[string]any{"name": "MUNINN_X", "type": "env_var"},
+			map[string]any{"name": "muninn", "type": "desk"},
+			map[string]any{"name": "Alice", "type": "person"},
+		},
+	}
+	req := &mbp.WriteRequest{}
+	malformed, coerced := applyEnrichmentArgs(args, req)
+
+	require.Zero(t, malformed)
+	// The coercion itself still happens (unchanged behaviour).
+	require.Len(t, req.Entities, 4)
+	require.Equal(t, "other", req.Entities[0].Type)
+	require.Equal(t, "person", req.Entities[3].Type, "a valid type must be untouched")
+
+	// ...but it is now REPORTED, sorted-unique, naming what the caller declared.
+	require.Equal(t, []string{"commit", "desk", "env_var"}, coerced)
+
+	hint := coercedTypeHint(coerced)
+	require.Contains(t, hint, `"commit"`)
+	require.Contains(t, hint, `"env_var"`)
+	require.Contains(t, hint, `"desk"`)
+	require.Contains(t, hint, "other", "the hint must say what was stored instead")
+	require.Contains(t, hint, "person", "the hint must list the recognised types")
+}
+
+func TestApplyEnrichmentArgs_NoCoercionNoHint(t *testing.T) {
+	args := map[string]any{
+		"entities": []any{
+			map[string]any{"name": "Alice", "type": "person"},
+			map[string]any{"name": "Muninn", "type": "PROJECT"}, // case-normalised, still valid
+		},
+	}
+	req := &mbp.WriteRequest{}
+	_, coerced := applyEnrichmentArgs(args, req)
+	require.Empty(t, coerced, "valid types must not be reported as coerced")
+	require.Empty(t, coercedTypeHint(coerced), "no coercion must produce no hint")
+}
+
+func TestApplyEnrichmentArgs_CoercedTypesDedupedAndSorted(t *testing.T) {
+	args := map[string]any{
+		"entities": []any{
+			map[string]any{"name": "a", "type": "zebra"},
+			map[string]any{"name": "b", "type": "commit"},
+			map[string]any{"name": "c", "type": "commit"}, // dup
+		},
+	}
+	req := &mbp.WriteRequest{}
+	_, coerced := applyEnrichmentArgs(args, req)
+	require.Equal(t, []string{"commit", "zebra"}, coerced)
+}

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -113,7 +114,7 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		req.CreatedAt = &t
 	}
 	applyTypeArgs(args, req)
-	malformed := applyEnrichmentArgs(args, req)
+	malformed, coercedTypes := applyEnrichmentArgs(args, req)
 	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
 		sendError(w, id, -32602, errMsg)
 		return
@@ -155,6 +156,12 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		}
 		result.Hint += fmt.Sprintf("%d entity item(s) were malformed (expected {\"name\":\"...\",\"type\":\"...\"} objects) and were skipped.", malformed)
 	}
+	if h := coercedTypeHint(coercedTypes); h != "" {
+		if result.Hint != "" {
+			result.Hint += " "
+		}
+		result.Hint += h
+	}
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 
@@ -171,6 +178,7 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 
 	reqs := make([]*mbp.WriteRequest, 0, len(memoriesAny))
 	malformedCounts := make([]int, 0, len(memoriesAny))
+	coercedLists := make([][]string, 0, len(memoriesAny))
 	for i, mAny := range memoriesAny {
 		m, ok := mAny.(map[string]any)
 		if !ok {
@@ -216,7 +224,7 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			req.CreatedAt = &t
 		}
 		applyTypeArgs(m, req)
-		malformed := applyEnrichmentArgs(m, req)
+		malformed, coercedTypes := applyEnrichmentArgs(m, req)
 		if emb, errMsg := parseEmbeddingArg(m); errMsg != "" {
 			sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].%s", i, strings.TrimPrefix(errMsg, "invalid params: ")))
 			return
@@ -229,6 +237,7 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		}
 		reqs = append(reqs, req)
 		malformedCounts = append(malformedCounts, malformed)
+		coercedLists = append(coercedLists, coercedTypes)
 	}
 
 	responses, errs := s.engine.WriteBatch(ctx, reqs)
@@ -250,6 +259,12 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		}
 		if malformedCounts[i] > 0 {
 			results[i].Hint = fmt.Sprintf("%d entity item(s) were malformed (expected {\"name\":\"...\",\"type\":\"...\"} objects) and were skipped.", malformedCounts[i])
+		}
+		if h := coercedTypeHint(coercedLists[i]); h != "" {
+			if results[i].Hint != "" {
+				results[i].Hint += " "
+			}
+			results[i].Hint += h
 		}
 	}
 	sendResult(w, id, textContent(mustJSON(map[string]any{
@@ -1276,8 +1291,41 @@ var validEntityTypes = map[string]bool{
 	"event": true, "other": true,
 }
 
-func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) int {
+// coercedTypeHint renders the caller-facing warning for declared entity types
+// that are not in validEntityTypes and were therefore stored as "other".
+// Silence here is a fiction: the caller declared a type, the store kept a
+// different one, and nothing said so (issue #80).
+func coercedTypeHint(coerced []string) string {
+	if len(coerced) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"entity type(s) %s are not recognised and were stored as \"other\" (recognised: %s).",
+		strings.Join(quoteAll(coerced), ", "), strings.Join(sortedValidEntityTypes(), ", "))
+}
+
+func quoteAll(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = strconv.Quote(s)
+	}
+	return out
+}
+
+func sortedValidEntityTypes() []string {
+	out := make([]string, 0, len(validEntityTypes))
+	for t := range validEntityTypes {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// applyEnrichmentArgs returns the number of malformed entity items skipped, and
+// the sorted-unique set of declared entity types that were coerced to "other".
+func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) (int, []string) {
 	malformed := 0
+	coercedSet := map[string]bool{}
 	if summary, ok := args["summary"].(string); ok && summary != "" {
 		req.Summary = summary
 	}
@@ -1299,6 +1347,7 @@ func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) int {
 				continue
 			}
 			if !validEntityTypes[typ] {
+				coercedSet[typ] = true
 				typ = "other"
 			}
 			req.Entities = append(req.Entities, mbp.InlineEntity{Name: name, Type: typ})
@@ -1366,7 +1415,12 @@ func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) int {
 			})
 		}
 	}
-	return malformed
+	coerced := make([]string, 0, len(coercedSet))
+	for t := range coercedSet {
+		coerced = append(coerced, t)
+	}
+	sort.Strings(coerced)
+	return malformed, coerced
 }
 
 var relTypeMap = map[string]storage.RelType{

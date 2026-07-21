@@ -31,7 +31,7 @@ func TestApplyEnrichmentArgs_PlainStringEntityMalformedCount(t *testing.T) {
 		},
 	}
 	req := &mbp.WriteRequest{}
-	malformed := applyEnrichmentArgs(args, req)
+	malformed, _ := applyEnrichmentArgs(args, req)
 	if malformed != 1 {
 		t.Errorf("expected malformedCount=1, got %d", malformed)
 	}

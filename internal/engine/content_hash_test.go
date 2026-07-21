@@ -47,6 +47,65 @@ func TestWriteDuplicateContentReturnsExistingID(t *testing.T) {
 	}
 }
 
+// TestWriteDuplicateContentEchoesStoredConcept verifies that a dedup hit reports
+// the concept AS STORED, not the one the caller submitted.
+//
+// This is the one case where the two can be told apart: on every clean write the
+// stored concept and the submitted concept are identical, so a normal write can
+// never discriminate "echoes stored" from "echoes submitted" — the two produce
+// byte-identical output. A dedup hit is the natural injected divergence, because
+// the write is a no-op and the caller's concept is discarded. Without this
+// assertion the response reports a value the store does not hold, and a caller
+// who trusts it believes a no-op was a write.
+func TestWriteDuplicateContentEchoesStoredConcept(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const body = "reading a price fetches it, so data is fresh where someone looked"
+
+	resp1, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   "default",
+		Content: body,
+		Concept: "stored-concept",
+	})
+	if err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if resp1.Concept != "stored-concept" {
+		t.Errorf("first write should report the concept it stored, got %q", resp1.Concept)
+	}
+
+	// Identical content, DIFFERENT concept — the divergence that makes the two
+	// hypotheses distinguishable.
+	resp2, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   "default",
+		Content: body,
+		Concept: "submitted-but-discarded",
+	})
+	if err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	if resp2.Hint != "duplicate_content" {
+		t.Fatalf("precondition: expected a dedup hit, got hint %q", resp2.Hint)
+	}
+	if resp2.Concept == "submitted-but-discarded" {
+		t.Error("dedup response echoed the SUBMITTED concept — it reports a value the store does not hold")
+	}
+	if resp2.Concept != "stored-concept" {
+		t.Errorf("dedup response should echo the stored concept %q, got %q", "stored-concept", resp2.Concept)
+	}
+
+	// The store must genuinely still hold the original concept.
+	got, err := eng.Read(ctx, &mbp.ReadRequest{Vault: "default", ID: resp1.ID})
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.Concept != "stored-concept" {
+		t.Errorf("store should still hold the original concept, got %q", got.Concept)
+	}
+}
+
 // TestWriteDifferentContentCreatesNewEngram verifies that different content
 // produces distinct engrams (no false dedup).
 func TestWriteDifferentContentCreatesNewEngram(t *testing.T) {

@@ -135,7 +135,15 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 			slog.Warn("mcp: failed to record idempotency receipt", "op_id", opID, "engram_id", resp.ID, "err", err)
 		}
 	}
-	result := WriteResult{ID: resp.ID, Concept: req.Concept}
+	// Prefer the concept the engine reports as STORED. It diverges from
+	// req.Concept exactly when the write was a content-dedup no-op, which is the
+	// one case where echoing the request would misreport the store's contents.
+	// Fall back to req.Concept when the engine does not supply one (normal write).
+	echoConcept := resp.Concept
+	if echoConcept == "" {
+		echoConcept = req.Concept
+	}
+	result := WriteResult{ID: resp.ID, Concept: echoConcept}
 	if resp.Hint != "" {
 		result.Hint = resp.Hint
 	} else if len(content) > 500 {

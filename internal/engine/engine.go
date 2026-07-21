@@ -862,10 +862,14 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 				Relevance:   existingEng.Relevance,
 				Stability:   existingEng.Stability,
 			})
+			// Echo the STORED concept, not the caller's: this write was a no-op
+			// against the existing engram, so reporting req.Concept would tell the
+			// caller their value landed when it did not.
 			return &mbp.WriteResponse{
 				ID:        existingID.String(),
 				CreatedAt: existingEng.CreatedAt.UnixNano(),
 				Hint:      "duplicate_content",
+				Concept:   existingEng.Concept,
 			}, nil
 		}
 		// Engram was soft-deleted or not found — remove stale hash mapping and proceed.
@@ -1215,6 +1219,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	return &mbp.WriteResponse{
 		ID:        id.String(),
 		CreatedAt: time.Now().UnixNano(),
+		Concept:   req.Concept,
 	}, nil
 }
 
@@ -1280,10 +1285,13 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 					Relevance:   existingEng.Relevance,
 					Stability:   existingEng.Stability,
 				})
+				// Echo the STORED concept, not the caller's — see the single-write
+				// path above; a dedup hit is a no-op and must not report otherwise.
 				responses[i] = &mbp.WriteResponse{
 					ID:        existingID.String(),
 					CreatedAt: existingEng.CreatedAt.UnixNano(),
 					Hint:      "duplicate_content",
+					Concept:   existingEng.Concept,
 				}
 				continue
 			}
@@ -1399,6 +1407,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		responses[origIdx] = &mbp.WriteResponse{
 			ID:        batchIDs[fi].String(),
 			CreatedAt: time.Now().UnixNano(),
+			Concept:   prepared[origIdx].eng.Concept,
 		}
 		// Store content hash → engram ID mapping for future dedup lookups.
 		if err := e.store.PutContentHash(ctx, prepared[origIdx].wsPrefix, prepared[origIdx].contentHash, batchIDs[fi]); err != nil {

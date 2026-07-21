@@ -97,10 +97,17 @@ type WriteRequest struct {
 }
 
 // WriteResponse confirms a write and returns the assigned ULID.
+//
+// Concept carries the concept AS STORED, which is not always the concept that
+// was submitted: on a content-dedup hit the write is a no-op against the
+// existing engram, and the caller's concept/summary are discarded. Callers echo
+// this field rather than their own request so that a response never reports a
+// value the store does not hold.
 type WriteResponse struct {
 	ID        string `msgpack:"id"         json:"id"`
 	CreatedAt int64  `msgpack:"created_at" json:"created_at"`
 	Hint      string `msgpack:"hint,omitempty" json:"hint,omitempty"`
+	Concept   string `msgpack:"concept,omitempty" json:"concept,omitempty"`
 }
 
 // ReadRequest retrieves an engram by ID.

@@ -96,14 +96,14 @@ func (p *EnrichmentPipeline) stageEnabled(stage string) bool {
 // don't already have caller-provided inline data on the engram.
 func (p *EnrichmentPipeline) stagesToRun(eng *storage.Engram) []string {
 	out := make([]string, 0, 4)
-	if p.stageEnabled("entities") && !engramHasEntities(eng) {
+	if p.stageEnabled("entities") && !looksFullyPreEnriched(eng) {
 		out = append(out, "entities")
 	}
 	// Relationships depend on entities. If entities are skipped because they
 	// already exist inline, we can't ask the model for relationships in a way
 	// it can ground; in that case skip relationships too. If entities are
 	// being asked for, ask for relationships alongside them.
-	if p.stageEnabled("relationships") && p.stageEnabled("entities") && !engramHasEntities(eng) {
+	if p.stageEnabled("relationships") && p.stageEnabled("entities") && !looksFullyPreEnriched(eng) {
 		out = append(out, "relationships")
 	}
 	if p.stageEnabled("classification") && !engramHasClassification(eng) {
@@ -400,12 +400,22 @@ func isResultEmpty(r *plugin.EnrichmentResult) bool {
 		r.Classification == ""
 }
 
-// engramHasEntities returns true if the engram already has caller-provided entities,
-// used as a skip-if-present guard in pipeline.Run for inline enrichment only.
-// The retroactive processor uses GetDigestFlags (DigestEntities flag) instead of this check.
-// This heuristic: only skip if both KeyPoints AND Summary are present, indicating the
-// caller provided a fully pre-enriched engram.
-func engramHasEntities(eng *storage.Engram) bool {
+// looksFullyPreEnriched is a PROXY heuristic for "the caller provided a fully
+// pre-enriched engram". It checks KeyPoints+Summary because the Engram struct
+// carries neither entity links nor digest flags, so the pipeline cannot ask
+// the authoritative question ("did the caller declare entities?") from here —
+// only the DigestEntities flag knows, and only the store has it.
+//
+// CAVEAT: this is WRONG for the common caller who declares entities + summary
+// but no key points — for those the entities stage still runs and the LLM's
+// guesses are stopped only at persist time by the DigestEntities flag guards
+// (retroactive.go processEnrichEngram, engine_replay.go). The waste (an LLM
+// asked for entities that will be discarded) is real; the damage is not,
+// provided the flag guards hold.
+//
+// Renamed from engramHasEntities, which claimed to check entities and did not
+// (issue #80, enrich half).
+func looksFullyPreEnriched(eng *storage.Engram) bool {
 	return len(eng.KeyPoints) > 0 && eng.Summary != ""
 }
 

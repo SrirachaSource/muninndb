@@ -1014,7 +1014,12 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		}
 		// Mark entities as caller-provided so the retroactive processor skips extraction.
 		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
-		_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEntities)
+		if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEntities); err != nil {
+			// A silently lost DigestEntities flag re-exposes this engram to
+			// retroactive entity extraction, which would replace the caller's
+			// declared entities with model guesses (issue #80). Say so.
+			slog.Warn("engine: failed to set DigestEntities flag; caller entities exposed to re-extraction", "id", id.String(), "err", err)
+		}
 	}
 
 	// Create associations from caller-provided relationships (after engram is stored).
@@ -2855,6 +2860,11 @@ func (e *Engine) EvolveWithConcept(ctx context.Context, vault, oldID, newContent
 		Concept: newConcept,
 		Content: newContent,
 		Tags:    oldEng.Tags,
+		// An evolve changes CONTENT, not IDENTITY: the classification made about
+		// the old memory still describes the new one, so carry it (issue #80,
+		// enrich half). Summary and embedding are NOT carried — content changed.
+		MemoryType: oldEng.MemoryType,
+		TypeLabel:  oldEng.TypeLabel,
 		// Inherit the epistemic state. Hardcoding these manufactured certainty:
 		// revising a claim BECAUSE you are less sure of it must not return a
 		// more confident engram than the one it replaces.
@@ -2998,6 +3008,23 @@ func (e *Engine) EvolveWithConcept(ctx context.Context, vault, oldID, newContent
 		}
 		if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(newULID), embedding); err != nil {
 			slog.Warn("engine: evolve: failed to insert client embedding into HNSW", "id", newULID.String(), "err", err)
+		}
+	}
+
+	// Carry the CLASSIFICATION digest flag (issue #80, enrich half). Entity and
+	// relationship links + their DigestEntities/DigestRelationships flags are
+	// already migrated above. But the evolved engram also inherits MemoryType/
+	// TypeLabel (set on newEng), so DigestClassified must carry too — otherwise
+	// the retroactive enricher re-classifies the evolved engram and can overwrite
+	// the caller-asserted type. NOT gated on entity migration: a classified
+	// engram with no entities still must keep its type. Summary is deliberately
+	// NOT carried — the content changed, so it must re-derive.
+	if oldFlags, err := e.store.GetDigestFlags(ctx, plugin.ULID(oldULID)); err == nil {
+		if oldFlags&plugin.DigestClassified != 0 {
+			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(newULID))
+			if err := e.store.SetDigestFlag(ctx, newULID, existing|plugin.DigestClassified); err != nil {
+				slog.Warn("engine: evolve: failed to carry DigestClassified; evolved engram exposed to re-classification", "id", newULID.String(), "err", err)
+			}
 		}
 	}
 

@@ -3,6 +3,8 @@ package mcp
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/buildinfo"
 )
 
 // JSON-RPC 2.0 envelope types
@@ -130,6 +132,11 @@ type VaultStatus struct {
 	// Enrichment capability
 	EnrichmentMode string                `json:"enrichment_mode"` // "none", "inline", "plugin:<name>"
 	Plugins        []PluginStatusSummary `json:"plugins,omitempty"`
+
+	// Build receipt for the server answering this call. An agent asking
+	// "is my fix live?" gets the answer in the same round-trip instead of
+	// inferring it from deploy timestamps.
+	Build buildinfo.Info `json:"build"`
 }
 
 // PluginStatusSummary is a brief health summary for one plugin.

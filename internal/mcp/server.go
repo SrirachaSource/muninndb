@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/buildinfo"
 )
 
 // MCPServer serves the MCP JSON-RPC 2.0 protocol on a single HTTP mux.
@@ -98,6 +99,11 @@ func New(addr string, eng EngineInterface, token string, keyAuth apiKeyValidator
 		}
 	})
 	mux.HandleFunc("/mcp/health", s.handleHealth)
+	// Both paths serve the same receipt: /version is the conventional place an
+	// operator looks, /mcp/version keeps it reachable where the MCP port is the
+	// only one exposed (the deploy image publishes 8750).
+	mux.HandleFunc("/version", s.handleVersion)
+	mux.HandleFunc("/mcp/version", s.handleVersion)
 	// OAuth 2.0 endpoints — no Bearer auth required (these ARE the auth mechanism).
 	mux.HandleFunc("/mcp/oauth/token", s.handleOAuthToken)
 	mux.HandleFunc("/authorize", s.handleAuthorize)
@@ -611,10 +617,34 @@ func (s *MCPServer) handleListTools(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"tools": allToolDefinitions()})
 }
 
+// handleHealth answers the liveness poll. It carries the build receipt so a
+// box-watcher already polling health can see a deploy's digest swap AND name
+// the revision that landed, in one unauthenticated request.
+//
+// A struct, not a map: encoding/json sorts map keys, which would serialise
+// "build" ahead of "status" and break any box-watcher doing a raw substring
+// match on the body rather than parsing it. Struct field order is preserved,
+// so the response still BEGINS `{"status":"ok"` exactly as before and the
+// receipt is purely additive.
 func (s *MCPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
+	json.NewEncoder(w).Encode(struct {
+		Status string         `json:"status"`
+		Build  buildinfo.Info `json:"build"`
+	}{
+		Status: "ok",
+		Build:  buildinfo.Get(),
+	})
+}
+
+// handleVersion is the dedicated build receipt: unauthenticated, no engine
+// call, cheap enough to poll. This is the endpoint that retires "infer the
+// running ref from a commit clock".
+func (s *MCPServer) handleVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(buildinfo.Get())
 }
 
 // sendResult writes a successful JSON-RPC response.

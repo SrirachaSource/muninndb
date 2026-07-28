@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scrypster/muninndb/internal/buildinfo"
 	"golang.org/x/term"
 )
 
@@ -26,6 +27,12 @@ func muninnVersion() string {
 	}
 	return "dev"
 }
+
+// Hand the release version to buildinfo, which is the single read point for
+// every surface that reports what this binary is (--version, /version,
+// /mcp/health, muninn_status). main.version stays the sole INJECTION point so
+// .goreleaser.yml and release.yml keep working unchanged.
+func init() { buildinfo.SetVersion(muninnVersion()) }
 
 // toolChoice represents an AI tool in the wizard selection list.
 type toolChoice struct {

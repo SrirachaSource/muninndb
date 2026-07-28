@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/scrypster/muninndb/internal/buildinfo"
 )
 
 func main() {
@@ -92,7 +94,17 @@ func main() {
 	case "help", "--help", "-h":
 		printHelp()
 	case "version", "--version":
-		fmt.Println(muninnVersion())
+		// Line 1 stays the bare version string — existing scripts parse it.
+		// The build receipt follows, so an operator on the box can name the
+		// exact source this binary was compiled from instead of inferring it.
+		b := buildinfo.Get()
+		fmt.Println(b.Version)
+		fmt.Printf("revision:   %s\n", b.Revision)
+		if b.Modified {
+			fmt.Println("tree:       MODIFIED (built from a dirty work tree)")
+		}
+		fmt.Printf("built:      %s\n", b.BuildTime)
+		fmt.Printf("go:         %s\n", b.GoVersion)
 		return
 	default:
 		// Container commands: "vault" or "vault:delete" both route to runVault.

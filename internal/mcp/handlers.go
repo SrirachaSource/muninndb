@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/buildinfo"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
@@ -531,6 +532,7 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 		TotalMemories:  resp.EngramCount,
 		Health:         "good",
 		EnrichmentMode: enrichMode,
+		Build:          buildinfo.Get(),
 		// Plugins: populated in a future task when plugin registry is accessible via handleStatus.
 	}
 	sendResult(w, id, textContent(mustJSON(status)))

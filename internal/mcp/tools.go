@@ -241,7 +241,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_status",
-			Description: "Get health and capacity statistics for the vault.",
+			Description: "Get health and capacity statistics for the vault, plus the server's build receipt (version, git revision, build time) so you can confirm which code is actually running.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

@@ -1,18 +1,19 @@
 // Package buildinfo is the single source of truth for what THIS binary is.
 //
-// Why it exists: a deployed server could not name the source it was built
-// from. Operators had to INFER the running revision by comparing a commit
-// clock against a build clock — an inference, not a receipt, and one that was
-// wrong at least once (a fix believed live on 2026-07-24 was not). The slim
-// runtime image carries no git tree and no source, so nothing on the box could
-// answer "which ref is this?".
+// Why it exists: a deployed server could not REPORT the source it was built
+// from. Operators inferred the running revision by comparing a commit clock
+// against a deploy clock — an inference, not a receipt, and one that was wrong
+// at least once (a fix believed live on 2026-07-24 was not).
 //
-// It did not need to be added to the binary — it was already there, unread.
-// The Go toolchain stamps VCS data (revision, commit time, dirty flag) into
-// every binary built from a version-controlled tree. That stamping survives
-// both a `git clone --depth 1` shallow checkout and `-ldflags="-s -w"`, which
-// is exactly how the deploy image is built. This package reads that stamp and
-// hands it to every surface that should be able to answer the question.
+// The data did not need to be added to the binary — it was already there,
+// unread. The Go toolchain stamps VCS data (revision, commit time, dirty flag)
+// into every binary built from a version-controlled tree, and that stamping
+// survives both a `git clone --depth 1` shallow checkout and `-ldflags="-s -w"`,
+// which is exactly how the deploy image is built. The slim runtime image
+// carries no git tree and no source, but the stamp rides inside the binary
+// itself — it is greppable from a shell on the box with no cooperation from
+// the service at all. This package makes the service serve it, so identifying
+// a running build needs neither container access nor a running shell.
 //
 // Honesty rule: when the stamp is absent this reports "unknown". It never
 // guesses and never infers. A confident wrong receipt is worse than no
@@ -56,12 +57,12 @@ func SetVersion(v string) {
 
 // Info is the build receipt for the running binary.
 type Info struct {
-	Version   string `json:"version"`        // release version, or "unknown"
-	Revision  string `json:"revision"`       // full git sha, or "unknown"
-	ShortRev  string `json:"short_revision"` // first 12 of the sha, or "unknown"
-	BuildTime string `json:"build_time"`     // RFC3339 commit time, or "unknown"
-	Modified  bool   `json:"modified"`       // true = built from a dirty tree
-	GoVersion string `json:"go_version"`     // toolchain that compiled it
+	Version    string `json:"version"`        // release version, or "unknown"
+	Revision   string `json:"revision"`       // full git sha, or "unknown"
+	ShortRev   string `json:"short_revision"` // first 12 of the sha, or "unknown"
+	CommitTime string `json:"commit_time"`    // RFC3339 time of the COMMIT, not the build
+	Modified   bool   `json:"modified"`       // true = built from a dirty tree
+	GoVersion  string `json:"go_version"`     // toolchain that compiled it
 }
 
 // Get returns the build receipt.
@@ -80,11 +81,11 @@ func Get() Info {
 	}
 
 	info := Info{
-		Version:   v,
-		Revision:  Unknown,
-		ShortRev:  Unknown,
-		BuildTime: Unknown,
-		GoVersion: runtime.Version(),
+		Version:    v,
+		Revision:   Unknown,
+		ShortRev:   Unknown,
+		CommitTime: Unknown,
+		GoVersion:  runtime.Version(),
 	}
 
 	bi, ok := debug.ReadBuildInfo()
@@ -99,8 +100,11 @@ func Get() Info {
 				info.ShortRev = shortRevision(s.Value)
 			}
 		case "vcs.time":
+			// This is the COMMIT timestamp, not when the binary was compiled.
+			// The toolchain does not stamp a build time (it would break
+			// reproducible builds), so we must not imply one.
 			if s.Value != "" {
-				info.BuildTime = s.Value
+				info.CommitTime = s.Value
 			}
 		case "vcs.modified":
 			info.Modified = s.Value == "true"
@@ -124,5 +128,5 @@ func (i Info) String() string {
 	if i.Modified {
 		s += " [dirty]"
 	}
-	return s + " built " + i.BuildTime + " with " + i.GoVersion
+	return s + " committed " + i.CommitTime + ", built with " + i.GoVersion
 }

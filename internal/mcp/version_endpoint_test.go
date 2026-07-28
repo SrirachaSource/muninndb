@@ -32,7 +32,7 @@ func doGet(t *testing.T, path string) (*http.Response, map[string]any) {
 
 func assertBuildReceipt(t *testing.T, path string, b map[string]any) {
 	t.Helper()
-	for _, key := range []string{"version", "revision", "short_revision", "build_time", "modified", "go_version"} {
+	for _, key := range []string{"version", "revision", "short_revision", "commit_time", "modified", "go_version"} {
 		v, ok := b[key]
 		if !ok {
 			t.Fatalf("GET %s: build receipt missing %q (got %v)", path, key, b)

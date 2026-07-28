@@ -103,7 +103,10 @@ func main() {
 		if b.Modified {
 			fmt.Println("tree:       MODIFIED (built from a dirty work tree)")
 		}
-		fmt.Printf("built:      %s\n", b.BuildTime)
+		// Labelled "commit", not "built": the toolchain stamps the COMMIT
+		// time, and calling it a build time would misdate the binary (a
+		// commit can ship in an image built days later).
+		fmt.Printf("commit:     %s\n", b.CommitTime)
 		fmt.Printf("go:         %s\n", b.GoVersion)
 		return
 	default:

@@ -24,7 +24,7 @@ func TestGetReportsUnknownRatherThanEmpty(t *testing.T) {
 	}
 	// The whole point of the package is that a field is never silently blank:
 	// an empty string reads as "no data" to a caller that expected a receipt.
-	if got.Revision == "" || got.ShortRev == "" || got.BuildTime == "" {
+	if got.Revision == "" || got.ShortRev == "" || got.CommitTime == "" {
 		t.Fatalf("blank field in receipt: %+v", got)
 	}
 	if got.GoVersion != runtime.Version() {
@@ -69,7 +69,7 @@ func TestShortRevisionDoesNotPadShortInput(t *testing.T) {
 }
 
 func TestStringIncludesVersionAndRevision(t *testing.T) {
-	i := Info{Version: "v1.2.3", ShortRev: "3beba4cb1234", BuildTime: "2026-07-28T02:30:00Z", GoVersion: "go1.26.2"}
+	i := Info{Version: "v1.2.3", ShortRev: "3beba4cb1234", CommitTime: "2026-07-28T02:30:00Z", GoVersion: "go1.26.2"}
 	got := i.String()
 	for _, want := range []string{"v1.2.3", "3beba4cb1234", "2026-07-28T02:30:00Z", "go1.26.2"} {
 		if !strings.Contains(got, want) {
@@ -85,7 +85,7 @@ func TestStringMarksDirtyBuild(t *testing.T) {
 	// A binary built from a modified tree does not correspond to any commit.
 	// Hiding that would reintroduce exactly the false confidence this package
 	// exists to remove.
-	i := Info{Version: "v1.2.3", ShortRev: "abc", BuildTime: "t", GoVersion: "go", Modified: true}
+	i := Info{Version: "v1.2.3", ShortRev: "abc", CommitTime: "t", GoVersion: "go", Modified: true}
 	if !strings.Contains(i.String(), "dirty") {
 		t.Fatalf("dirty build not marked: %q", i.String())
 	}
@@ -100,7 +100,7 @@ func TestInfoJSONFieldNames(t *testing.T) {
 	}
 	for _, key := range []string{
 		`"version"`, `"revision"`, `"short_revision"`,
-		`"build_time"`, `"modified"`, `"go_version"`,
+		`"commit_time"`, `"modified"`, `"go_version"`,
 	} {
 		if !strings.Contains(string(b), key) {
 			t.Fatalf("JSON missing %s: %s", key, b)

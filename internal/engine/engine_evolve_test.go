@@ -205,3 +205,116 @@ func TestEvolve_CarriesClassificationNotSummarizedFlag(t *testing.T) {
 	assert.Zero(t, newFlags&plugin.DigestSummarized,
 		"DigestSummarized must NOT carry: content changed, summary re-derives")
 }
+
+// TestEvolve_RefusesAlreadySupersededEngram is the fork guard: evolving an engram
+// that has ALREADY been evolved must be refused, and the error must name the
+// successor to evolve instead.
+//
+// THE DEFECT (observed live by the scalping desk 2026-07-29): a soft-deleted engram
+// keeps resolving, so a second Evolve against the same predecessor id succeeded and
+// minted a SECOND successor. Both successors were active, both ranked in recall, and
+// nothing in either response hinted at the duplicate. The trigger is a STALE id --
+// any caller holding an id that went stale the moment it was first evolved: a repair
+// re-run, a retried tool call, an id copied into a note or a boot anchor.
+func TestEvolve_RefusesAlreadySupersededEngram(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	ws := eng.store.ResolveVaultPrefix("test")
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "test", Concept: "Original", Content: "v1 content",
+	})
+	require.NoError(t, err)
+	oldULID, err := storage.ParseULID(resp.ID)
+	require.NoError(t, err)
+
+	// First evolve off the live head: must succeed.
+	firstID, err := eng.Evolve(ctx, "test", resp.ID, "v2 content", "first revision", nil)
+	require.NoError(t, err, "the first evolve off a live engram must succeed")
+
+	// POWER CHECK: the predecessor really is superseded now, or the refusal below
+	// could pass for the wrong reason (e.g. a guard that refuses everything).
+	oldEng, err := eng.store.GetEngram(ctx, ws, oldULID)
+	require.NoError(t, err)
+	require.NotNil(t, oldEng, "predecessor must still RESOLVE -- that is what makes the fork reachable")
+	require.Equal(t, storage.StateSoftDeleted, oldEng.State, "precondition: predecessor soft-deleted")
+
+	// THE GUARD: a second evolve against the SAME (now stale) predecessor id.
+	forkID, err := eng.Evolve(ctx, "test", resp.ID, "v2-prime content", "accidental re-run", nil)
+	require.Error(t, err, "evolving an already-superseded engram must be REFUSED, not forked")
+	assert.ErrorIs(t, err, ErrAlreadySuperseded)
+	assert.Equal(t, storage.ULID{}, forkID, "a refused evolve must not return a new id")
+	assert.Contains(t, err.Error(), firstID.String(),
+		"the error must NAME the successor so the caller knows which id to evolve instead")
+
+	// AND NO FORK WAS CREATED: exactly one RelSupersedes edge targets the
+	// predecessor, so the version chain still has a single head.
+	rev, err := eng.store.GetReverseAssociations(ctx, ws, oldULID, 64)
+	require.NoError(t, err)
+	successors := 0
+	for _, a := range rev {
+		if a.RelType == storage.RelSupersedes {
+			successors++
+		}
+	}
+	assert.Equal(t, 1, successors,
+		"the predecessor must have exactly ONE successor; two means the fork was written anyway")
+}
+
+// TestEvolve_HeadChainingStillAllowed pins the SAFE side of the fork guard's
+// boundary: evolving the CURRENT head repeatedly is legitimate and must keep
+// working. The guard discriminates on "is this engram already superseded", not on
+// "has this chain been evolved before", so a walk down the chain is unaffected.
+//
+// This half is the one worth pinning. It was asserted as safe from inference for a
+// while before anyone exercised it, and an unexercised safe case is the dangerous
+// direction -- it invites exactly the call the rule forbids. The vor desk gave it a
+// behavioural receipt against live prod on 2026-07-29 (two evolves each off the
+// then-current head: both predecessors soft-deleted with correct forward pointers,
+// exactly one record active, one hit in recall). This test is that receipt, pinned,
+// so it can never quietly decay back into an inference.
+func TestEvolve_HeadChainingStillAllowed(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	ws := eng.store.ResolveVaultPrefix("test")
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "test", Concept: "Original", Content: "v1 content",
+	})
+	require.NoError(t, err)
+
+	// v1 -> v2, off the live head.
+	secondID, err := eng.Evolve(ctx, "test", resp.ID, "v2 content", "first revision", nil)
+	require.NoError(t, err)
+
+	// v2 -> v3, off the NEW head. This is the case the guard must NOT block.
+	thirdID, err := eng.Evolve(ctx, "test", secondID.String(), "v3 content", "second revision", nil)
+	require.NoError(t, err, "chaining off the CURRENT head must remain allowed")
+	require.NotEqual(t, secondID, thirdID)
+
+	// Exactly one live record at the end of the chain: v3 active, v2 superseded.
+	thirdEng, err := eng.store.GetEngram(ctx, ws, thirdID)
+	require.NoError(t, err)
+	require.NotNil(t, thirdEng)
+	assert.Equal(t, storage.StateActive, thirdEng.State, "the chain head must be active")
+
+	secondEng, err := eng.store.GetEngram(ctx, ws, secondID)
+	require.NoError(t, err)
+	require.NotNil(t, secondEng)
+	assert.Equal(t, storage.StateSoftDeleted, secondEng.State,
+		"the intermediate version must be soft-deleted, not left live alongside the head")
+
+	// And the chain is walkable one hop at a time: v3 supersedes v2 (not v1).
+	rev, err := eng.store.GetReverseAssociations(ctx, ws, secondID, 64)
+	require.NoError(t, err)
+	var namedSuccessor string
+	for _, a := range rev {
+		if a.RelType == storage.RelSupersedes {
+			namedSuccessor = a.TargetID.String()
+		}
+	}
+	assert.Equal(t, thirdID.String(), namedSuccessor,
+		"v2's recorded successor must be v3 -- the immediate-predecessor link a reader walks")
+}

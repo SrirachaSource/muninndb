@@ -2852,6 +2852,44 @@ func (e *Engine) EvolveWithConcept(ctx context.Context, vault, oldID, newContent
 		return storage.ULID{}, fmt.Errorf("evolve: read old reverse associations: %w", err)
 	}
 
+	// REFUSE TO EVOLVE AN ALREADY-SUPERSEDED ENGRAM (the fork, issue #82-adjacent;
+	// observed live by the scalping desk 2026-07-29).
+	//
+	// Evolve mints a NEW ULID and soft-deletes the predecessor, but a soft-deleted
+	// engram keeps resolving: GetEngram above returns it happily, and Restore gates
+	// on state alone. So evolving the SAME predecessor id twice — a repair re-run, a
+	// retried tool call, or any caller holding an id that went stale the moment it was
+	// first evolved — succeeded twice and left TWO live near-duplicate successors,
+	// both ranking in recall, with no error and nothing in the response to hint at it.
+	// Neither copy is wrong on its face, which is what makes it expensive: the
+	// duplicate is only visible to someone who reads both.
+	//
+	// The successor was always knowable — Evolve writes a RelSupersedes edge from the
+	// successor back to the predecessor, and oldRev (already in hand, read above, so
+	// this guard costs no additional I/O) carries it. Evolve simply never asked. Same
+	// edge semantics as supersededBy(): GetReverseAssociations reports each edge's
+	// SOURCE in Association.TargetID, so a RelSupersedes hit names the successor, and
+	// the newest wins because ULIDs sort lexicographically by creation time.
+	//
+	// Refuse and NAME the successor rather than silently redirecting to it: the caller
+	// asked to revise a specific version, and quietly retargeting their write to a
+	// different engram than the one they named is its own surprise. The error tells
+	// them exactly which id to evolve instead.
+	var alreadySupersededBy string
+	for _, a := range oldRev {
+		if a.RelType != storage.RelSupersedes {
+			continue
+		}
+		if s := a.TargetID.String(); s > alreadySupersededBy {
+			alreadySupersededBy = s
+		}
+	}
+	if alreadySupersededBy != "" {
+		return storage.ULID{}, fmt.Errorf(
+			"%w: engram %s was already superseded by %s; evolve %s instead (evolving a superseded engram forks the version chain into two live near-duplicates)",
+			ErrAlreadySuperseded, oldID, alreadySupersededBy, alreadySupersededBy)
+	}
+
 	// Read the old engram's ENTITY graph before any writes, for the same reason
 	// as the associations above: entity links and entity-relationship records
 	// are keyed by engram id, so without migration every caller-set entity stays

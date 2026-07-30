@@ -24,6 +24,12 @@ var ErrEngramSoftDeleted = errors.New("engram is soft-deleted")
 // been archived. Use errors.Is to check for this error in callers.
 var ErrEngramArchived = errors.New("engram is archived")
 
+// ErrAlreadySuperseded is returned when Evolve targets an engram that has already
+// been evolved. Evolving a superseded engram forks the version chain into two live
+// near-duplicates that both rank in recall, so it is refused; the error names the
+// successor to evolve instead. Use errors.Is to check for this error in callers.
+var ErrAlreadySuperseded = errors.New("engram already superseded")
+
 // ErrVaultNameCollision is returned when a rename or clone targets a vault name
 // that already exists. Use errors.Is to check for this error in callers.
 var ErrVaultNameCollision = errors.New("vault name already exists")

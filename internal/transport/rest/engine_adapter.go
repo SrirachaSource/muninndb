@@ -475,7 +475,7 @@ func (w *RESTEngineWrapper) ListDeleted(ctx context.Context, vault string, limit
 			ID:               eng.ID.String(),
 			Concept:          eng.Concept,
 			DeletedAt:        deletedAt.Unix(),
-			RecoverableUntil: deletedAt.Add(7 * 24 * time.Hour).Unix(),
+			RecoverableUntil: engine.RecoverableUntil(deletedAt).Unix(),
 			Tags:             eng.Tags,
 		}
 	}

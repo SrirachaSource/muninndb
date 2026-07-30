@@ -2602,6 +2602,38 @@ func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 	return stats
 }
 
+// RecoverableWindow is the advertised grace period between a soft delete and the
+// point a caller should assume the engram is gone. Both transports report it as
+// `recoverable_until` (deleted_at + RecoverableWindow); it lived as a bare literal
+// in each adapter, so it is centralised here — the engine owns lifecycle policy,
+// and a purge, if one is ever built, belongs on this side of the boundary.
+//
+// !! IT IS ADVISORY, NOT ENFORCED (verified 2026-07-29). !! Nothing purges
+// soft-deleted engrams: Restore below gates on STATE alone and never consults a
+// deadline, and there is no sweep anywhere that hard-deletes by age (the only
+// other weekly ticker is runArchiveGCWorker, which prunes archived EDGES on four
+// unrelated conditions). So a soft-deleted engram is in practice restorable
+// indefinitely, and this constant describes an intended policy rather than a
+// mechanism that exists. Do not present it to a caller as a hard deadline, and do
+// not add enforcement here without an explicit decision — a background worker that
+// destroys memory on a timer is not a change to make quietly.
+const RecoverableWindow = 7 * 24 * time.Hour
+
+// RecoverableUntil returns the point a caller should assume a soft-deleted engram
+// is gone, given when it was deleted. It exists so the two transports cannot drift:
+// the MCP adapter computed this from time.Now() while REST computed it from
+// deletedAt, so the same engram reported two different deadlines depending on which
+// door you knocked on, and the MCP one re-based on every call — an engram an hour
+// from the (unenforced) limit still reported a full seven days, forever. Both
+// adapters now call this; the only thing left for them to differ on is the wire
+// format (MCP emits time.Time, REST emits a Unix int64).
+//
+// Read the RecoverableWindow comment above before treating the result as a promise:
+// nothing purges soft-deleted engrams, so this is advisory.
+func RecoverableUntil(deletedAt time.Time) time.Time {
+	return deletedAt.Add(RecoverableWindow)
+}
+
 // Restore un-deletes a soft-deleted engram by restoring its state to StateActive.
 // Returns an error if the engram does not exist or was hard-deleted.
 func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram, error) {

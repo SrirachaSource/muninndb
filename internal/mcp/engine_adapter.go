@@ -177,17 +177,24 @@ func (a *mcpEngineAdapter) ListDeleted(ctx context.Context, vault string, limit 
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
 	result := make([]DeletedEngram, 0, len(engrams))
 	for _, eng := range engrams {
 		if eng == nil {
 			continue
 		}
+		// The recovery window runs from the DELETION, not from the moment you
+		// happened to ask. Computing it off time.Now() made the field a constant
+		// wearing a deadline's clothes: it re-based on every call, so an engram
+		// one hour from permanent loss reported a full seven days remaining, and
+		// no amount of polling ever showed it moving. The REST adapter
+		// (internal/transport/rest/engine_adapter.go, ListDeleted) has always
+		// done this correctly off deletedAt; this is that line, brought over.
+		deletedAt := eng.UpdatedAt
 		result = append(result, DeletedEngram{
 			ID:               eng.ID.String(),
 			Concept:          eng.Concept,
-			DeletedAt:        eng.UpdatedAt,
-			RecoverableUntil: now.Add(7 * 24 * time.Hour),
+			DeletedAt:        deletedAt,
+			RecoverableUntil: engine.RecoverableUntil(deletedAt),
 			Tags:             eng.Tags,
 		})
 	}

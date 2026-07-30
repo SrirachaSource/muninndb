@@ -250,16 +250,34 @@ func TestEvolve_RefusesAlreadySupersededEngram(t *testing.T) {
 
 	// AND NO FORK WAS CREATED: exactly one RelSupersedes edge targets the
 	// predecessor, so the version chain still has a single head.
+	//
+	// COUNTING IS NOT ENOUGH, and this assertion exists because the vor desk
+	// pre-registered the criterion before this shipped: a refusal must not be a
+	// silent no-op, and "one edge" would also hold if the guard had let the second
+	// evolve REPLACE the original edge rather than add to it. So the surviving
+	// successor must be the ORIGINAL one, by identity -- a call that quietly does
+	// something else looks identical to a refusal if you only count records.
 	rev, err := eng.store.GetReverseAssociations(ctx, ws, oldULID, 64)
 	require.NoError(t, err)
-	successors := 0
+	var survivors []string
 	for _, a := range rev {
 		if a.RelType == storage.RelSupersedes {
-			successors++
+			survivors = append(survivors, a.TargetID.String())
 		}
 	}
-	assert.Equal(t, 1, successors,
-		"the predecessor must have exactly ONE successor; two means the fork was written anyway")
+	assert.Equal(t, []string{firstID.String()}, survivors,
+		"the predecessor's superseded-by must still name the ORIGINAL successor, unchanged: "+
+			"two entries mean the fork was written anyway, a different one means the refusal quietly rewrote the chain")
+
+	// The original successor must also still be intact and ACTIVE -- a refused call
+	// must not have disturbed the live head on its way out.
+	firstEng, err := eng.store.GetEngram(ctx, ws, firstID)
+	require.NoError(t, err)
+	require.NotNil(t, firstEng)
+	assert.Equal(t, storage.StateActive, firstEng.State,
+		"the refused evolve must leave the existing head untouched and active")
+	assert.Equal(t, "v2 content", firstEng.Content,
+		"the refused evolve must not have written its content anywhere")
 }
 
 // TestEvolve_HeadChainingStillAllowed pins the SAFE side of the fork guard's
